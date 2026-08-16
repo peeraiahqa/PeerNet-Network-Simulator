@@ -1,0 +1,241 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#050d17}
+body{font-family:Consolas,"Courier New",monospace}
+.terminal{
+  width:100%;
+  height:100%;
+  display:flex;
+  flex-direction:column;
+  background:#050d17;
+  color:#b9f8c5;
+  border:1px solid #1c2a3d;
+  border-radius:12px;
+  overflow:hidden;
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,.02)
+}
+.head{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:.6rem;
+  padding:8px 11px;
+  border-bottom:1px solid #1e2c40;
+  background:#0b1523;
+  color:#d6e4fa;
+  font-family:Inter,Segoe UI,Arial,sans-serif;
+  font-size:11px;
+  font-weight:800
+}
+.status{
+  display:flex;
+  align-items:center;
+  gap:6px;
+  color:#87f39d
+}
+.dot{
+  width:8px;height:8px;border-radius:50%;background:#22c55e;
+  box-shadow:0 0 0 3px rgba(34,197,94,.10)
+}
+.screen{
+  flex:1;
+  overflow:auto;
+  padding:12px 13px 16px;
+  cursor:text;
+  scrollbar-width:thin;
+  scrollbar-color:#24354d #050d17
+}
+.history{
+  white-space:pre-wrap;
+  word-break:break-word;
+  font-size:13px;
+  line-height:1.48;
+  color:#b9f8c5
+}
+.command-line{
+  display:flex;
+  align-items:flex-start;
+  gap:6px;
+  min-height:22px;
+  margin-top:2px;
+  font-size:13px;
+  line-height:1.48
+}
+.prompt{
+  flex:0 0 auto;
+  color:#71e98c;
+  font-weight:700;
+  white-space:pre
+}
+.input-wrap{
+  flex:1;
+  position:relative;
+  min-width:0
+}
+#cmd{
+  width:100%;
+  padding:0;
+  margin:0;
+  border:0;
+  outline:0;
+  resize:none;
+  overflow:hidden;
+  background:transparent;
+  color:#e6ffe9;
+  caret-color:#6ef58b;
+  font:inherit;
+  line-height:inherit;
+  min-height:22px;
+  max-height:88px
+}
+.hint{
+  position:absolute;
+  right:10px;
+  bottom:8px;
+  color:#53647c;
+  font-family:Inter,Segoe UI,Arial,sans-serif;
+  font-size:9px;
+  pointer-events:none
+}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+const Streamlit = {
+  ready(){
+    parent.postMessage({
+      isStreamlitMessage:true,
+      type:"streamlit:componentReady",
+      apiVersion:1
+    },"*")
+  },
+  setValue(value){
+    parent.postMessage({
+      isStreamlitMessage:true,
+      type:"streamlit:setComponentValue",
+      value
+    },"*")
+  },
+  setHeight(height){
+    parent.postMessage({
+      isStreamlitMessage:true,
+      type:"streamlit:setFrameHeight",
+      height
+    },"*")
+  }
+}
+
+let args = {
+  history:"",
+  prompt:"",
+  device_name:"",
+  prefill:"",
+  height:360
+}
+
+function escapeHtml(value){
+  return String(value ?? "").replace(/[&<>"']/g, ch => ({
+    "&":"&amp;",
+    "<":"&lt;",
+    ">":"&gt;",
+    '"':"&quot;",
+    "'":"&#039;"
+  }[ch]))
+}
+
+function autoSize(textarea){
+  textarea.style.height="22px"
+  textarea.style.height=Math.min(textarea.scrollHeight,88)+"px"
+}
+
+function render(){
+  const root=document.getElementById("root")
+  root.innerHTML=""
+
+  const terminal=document.createElement("div")
+  terminal.className="terminal"
+  terminal.style.height=(args.height||360)+"px"
+
+  terminal.innerHTML=`
+    <div class="head">
+      <span>PeerNet Device Console · ${escapeHtml(args.device_name||"Device")}</span>
+      <span class="status"><span class="dot"></span>Connected</span>
+    </div>
+    <div class="screen" id="screen">
+      <div class="history">${escapeHtml(args.history||"")}</div>
+      <div class="command-line">
+        <span class="prompt">${escapeHtml(args.prompt||"")}</span>
+        <div class="input-wrap">
+          <textarea id="cmd" rows="1" spellcheck="false" autocomplete="off" autocapitalize="off">${escapeHtml(args.prefill||"")}</textarea>
+        </div>
+      </div>
+      <div class="hint">Enter = execute · Tab = complete/show matches</div>
+    </div>
+  `
+
+  root.appendChild(terminal)
+
+  const screen=terminal.querySelector("#screen")
+  const cmd=terminal.querySelector("#cmd")
+
+  const focusInput=()=>{
+    cmd.focus()
+    const len=cmd.value.length
+    cmd.setSelectionRange(len,len)
+  }
+
+  screen.onclick=focusInput
+  terminal.onclick=focusInput
+
+  cmd.addEventListener("input",()=>autoSize(cmd))
+
+  cmd.addEventListener("keydown",event=>{
+    if(event.key==="Tab"){
+      event.preventDefault()
+      Streamlit.setValue({
+        id:Date.now()+"-"+Math.random(),
+        action:"tab",
+        command:cmd.value,
+        device_name:args.device_name
+      })
+      return
+    }
+
+    if(event.key==="Enter" && !event.shiftKey){
+      event.preventDefault()
+      const command=cmd.value.trim()
+      Streamlit.setValue({
+        id:Date.now()+"-"+Math.random(),
+        action:"command",
+        command,
+        device_name:args.device_name
+      })
+      cmd.value=""
+      autoSize(cmd)
+    }
+  })
+
+  setTimeout(()=>{
+    screen.scrollTop=screen.scrollHeight
+    focusInput()
+  },30)
+
+  Streamlit.setHeight(args.height||360)
+}
+
+window.addEventListener("message",event=>{
+  if(event.data?.type!=="streamlit:render")return
+  args=event.data.args||args
+  render()
+})
+
+Streamlit.ready()
+</script>
+</body>
+</html>

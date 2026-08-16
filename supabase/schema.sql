@@ -1,6 +1,13 @@
--- PeerNet Network Simulator
--- Safe to run in the same Supabase project as PeerNet AI.
--- This script creates only simulator-specific objects.
+-- ================================================================
+-- PEERNET NETWORK SIMULATOR ONLY
+-- ================================================================
+-- SAFE WITH PEERNET AI:
+-- * Uses the existing Supabase Auth service (auth.users) only for identity.
+-- * Creates/changes ONLY public.simulator_projects and its own indexes,
+--   RLS policies, trigger, and set_simulator_project_updated_at function.
+-- * Does NOT DROP, ALTER, UPDATE, DELETE, or rename PeerNet AI tables.
+-- * Do not rename simulator_projects to an AI table name.
+-- ================================================================
 
 create extension if not exists pgcrypto;
 
