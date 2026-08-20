@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import html
 import ipaddress
 import shutil
@@ -31,6 +32,66 @@ from supabase_service import (
 )
 from topology_component import topology_canvas
 from terminal_component import inline_terminal
+from switch_cli import (
+    DEFAULT_VLANS,
+    configure_switchports,
+    ensure_switch_defaults,
+    is_switch,
+    resolve_interface_range,
+    show_interface_switchport,
+    show_interfaces_status as show_switch_interfaces_status,
+    show_interfaces_trunk,
+    show_vlan_brief as show_switch_vlan_brief,
+    validate_vlan_id,
+)
+from routing_cli import (
+    configure_interface_routing,
+    configure_policy,
+    configure_route_map_mode,
+    configure_router_mode,
+    configure_static_route,
+    ensure_routing_defaults,
+    enter_router_mode,
+    is_routing_device,
+    routing_running_config,
+    show_routing_summary,
+)
+from routing_engine import evaluate_route
+from network_validation import (
+    audit_topology,
+    validate_gateway,
+    validate_interface_address,
+)
+from dhcp_engine import (
+    allocate_lease,
+    configure_dhcp_global,
+    configure_dhcp_pool,
+    dhcp_running_config,
+    release_lease,
+    show_dhcp_bindings,
+    show_dhcp_pools,
+)
+from acl_engine import (
+    acl_running_config,
+    configure_access_group,
+    configure_access_list,
+    show_access_lists,
+)
+from nat_engine import (
+    clear_translations,
+    configure_nat_global,
+    configure_nat_interface,
+    nat_running_config,
+    show_statistics as show_nat_statistics,
+    show_translations as show_nat_translations,
+)
+from dns_engine import (
+    configure_ip_host,
+    configure_server_record,
+    dns_running_config,
+    resolve_name,
+    show_records as show_dns_records,
+)
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -52,6 +113,24 @@ class Interface:
     ip_address: str = ""
     status: str = "up"
     connected_to: Optional[str] = None
+    switchport_mode: str = "access"
+    access_vlan: int = 1
+    native_vlan: int = 1
+    trunk_allowed_vlans: list[int] = field(default_factory=list)
+    description: str = ""
+    ipv6_address: str = ""
+    encapsulation_dot1q: Optional[int] = None
+    encapsulation_native: bool = False
+    ospfv3_process: str = ""
+    ospfv3_area: str = ""
+    tunnel_source: str = ""
+    tunnel_destination: str = ""
+    tunnel_mode: str = "gre ip"
+    ipsec_profile: str = ""
+    access_group_in: str = ""
+    access_group_out: str = ""
+    nat_inside: bool = False
+    nat_outside: bool = False
 
 
 @dataclass
@@ -62,6 +141,10 @@ class Device:
     routing_table: Dict[str, str] = field(default_factory=dict)
     default_gateway: str = ""
     dns_server: str = ""
+    vlans: Dict[int, str] = field(default_factory=dict)
+    route_distances: Dict[str, int] = field(default_factory=dict)
+    routing_config: dict = field(default_factory=dict)
+    startup_config: dict = field(default_factory=dict)
 
 
 DEVICE_GROUPS = {
@@ -93,8 +176,7 @@ DEFAULT_INTERFACES = {
     ],
     "Switch": [
         "Gi0/1", "Gi0/2", "Gi0/3", "Gi0/4",
-        "Fa0/1", "Fa0/2", "Fa0/3", "Fa0/4",
-        "Fa0/5", "Fa0/6", "Fa0/7", "Fa0/8"
+        *[f"Fa0/{port}" for port in range(1, 25)],
     ],
     "Multilayer Switch": [
         "Gi0/1", "Gi0/2", "Gi0/3", "Gi0/4",
@@ -273,12 +355,13 @@ def apply_styles() -> None:
         .pn-topbar h2 {
             margin:0;
             color:#111827;
-            font-size:1.15rem;
+            font-size:1.35rem;
         }
 
         .pn-subtitle {
             color:#64748b;
-            font-size:.7rem;
+            font-size:.82rem;
+            font-weight:650;
         }
 
         .pn-canvas-card {
@@ -594,6 +677,25 @@ body {
     border:0 !important;
 }
 
+[class*="st-key-stop_ping_animation"] button,
+[class*="st-key-stop_trace_animation"] button {
+    width:auto !important;
+    min-width:150px !important;
+    max-width:210px !important;
+    color:#ffffff !important;
+    border:0 !important;
+    border-radius:9px !important;
+    font-weight:850 !important;
+}
+
+[class*="st-key-stop_ping_animation"] button {
+    background:linear-gradient(135deg,#dc2626,#ef4444) !important;
+}
+
+[class*="st-key-stop_trace_animation"] button {
+    background:linear-gradient(135deg,#ea580c,#f97316) !important;
+}
+
 [class*="st-key-run_trace"] button {
     background: linear-gradient(135deg,#7c3aed,#9333ea) !important;
     color:#ffffff !important;
@@ -701,6 +803,11 @@ def init_state() -> None:
         "positions": {},
         "cli_modes": {},
         "cli_interfaces": {},
+        "cli_interface_ranges": {},
+        "cli_vlans": {},
+        "cli_routing_contexts": {},
+        "cli_route_map_contexts": {},
+        "cli_dhcp_contexts": {},
         "cli_history": {},
         "booted": set(),
         "selected_device": None,
@@ -716,6 +823,7 @@ def init_state() -> None:
         "packet_records": [],
         "packet_analysis_output": [],
         "packet_sequence": 0,
+        "packet_animation": {},
         "events_log": [],
         "last_capture_path": "",
         "connect_source": None,
@@ -745,6 +853,8 @@ def add_device(device_type: str, position: Optional[dict] = None) -> str:
             for item in DEFAULT_INTERFACES.get(device_type, ["eth0"])
         },
     )
+    ensure_switch_defaults(st.session_state.devices[name])
+    ensure_routing_defaults(st.session_state.devices[name])
 
     count = len(st.session_state.devices)
     st.session_state.positions[name] = position or {
@@ -764,6 +874,51 @@ CONNECTOR_TYPES = {
     "Serial": "serial",
     "Wireless": "wireless",
 }
+
+
+def connector_preview_html(selected: str) -> str:
+    connector_styles = {
+        "Ethernet / Copper": {
+            "color": "#111827",
+            "border": "2px solid #111827",
+            "description": "Solid copper Ethernet cable",
+        },
+        "Fiber / Optical": {
+            "color": "#7c3aed",
+            "border": "3px solid #7c3aed",
+            "description": "Thick purple optical fiber",
+        },
+        "Serial": {
+            "color": "#f59e0b",
+            "border": "3px dashed #f59e0b",
+            "description": "Dashed amber serial cable",
+        },
+        "Wireless": {
+            "color": "#0ea5e9",
+            "border": "3px dotted #0ea5e9",
+            "description": "Dotted blue wireless connection",
+        },
+    }
+    style = connector_styles.get(selected, connector_styles["Ethernet / Copper"])
+    return f"""
+    <div style="
+        display:flex;align-items:center;gap:10px;
+        margin:0 0 4px;padding:4px 8px;
+        border:1px solid #dbe4f0;border-radius:9px;
+        background:#f8fafc;
+    ">
+        <span style="
+            display:inline-block;width:70px;height:0;
+            border-top:{style['border']};
+        "></span>
+        <span style="font-size:11px;font-weight:800;color:{style['color']};">
+            {html.escape(selected)}
+        </span>
+        <span style="font-size:10px;color:#64748b;">
+            {style['description']}
+        </span>
+    </div>
+    """
 
 
 def free_interfaces(device_name: str) -> list[str]:
@@ -845,11 +1000,160 @@ def connect_interfaces(
         }
     )
 
+    add_event(
+        f"Connected {source}:{source_if} ↔ "
+        f"{target}:{target_if} using {connector_type}."
+    )
+
     return (
         True,
         f"Connected {source}:{source_if} ↔ "
         f"{target}:{target_if} using {connector_type}.",
     )
+
+
+def link_label(link: dict) -> str:
+    return (
+        f"{link.get('source', 'unknown')}:"
+        f"{link.get('source_if') or 'unassigned'} ↔ "
+        f"{link.get('target', 'unknown')}:"
+        f"{link.get('target_if') or 'unassigned'}"
+    )
+
+
+def link_operational_status(link: dict) -> tuple[str, str]:
+    """Return topology status class and a user-facing reason."""
+    if link.get("forced_down"):
+        return "down", "Cable failure simulated"
+
+    endpoints = (
+        (link.get("source"), link.get("source_if")),
+        (link.get("target"), link.get("target_if")),
+    )
+    for device_name, interface_name in endpoints:
+        device = st.session_state.devices.get(device_name)
+        interface = (
+            device.interfaces.get(interface_name)
+            if device and interface_name
+            else None
+        )
+        if interface is None:
+            return "down", f"{device_name}:{interface_name or 'unassigned'} is missing"
+        status = str(interface.status).lower()
+        if status == "administratively down":
+            return "admin-down", f"{device_name}:{interface_name} is administratively down"
+        if status == "down":
+            return "down", f"{device_name}:{interface_name} is down"
+
+    return "up", "Both interfaces are operational"
+
+
+def topology_interface_details(
+    device_name: str,
+    interface_name: str,
+) -> dict[str, str]:
+    device = st.session_state.devices.get(device_name)
+    interface = (
+        device.interfaces.get(interface_name)
+        if device and interface_name
+        else None
+    )
+    if interface is None:
+        return {
+            "device": device_name or "unknown",
+            "interface": interface_name or "unassigned",
+            "ip": "unassigned",
+            "mode": "unknown",
+            "vlan": "unassigned",
+            "status": "down",
+        }
+
+    if device.device_type in {"Switch", "Multilayer Switch"}:
+        mode = getattr(interface, "switchport_mode", "") or "access"
+    else:
+        mode = "routed"
+    if mode == "access":
+        vlan = f"access VLAN {getattr(interface, 'access_vlan', 1)}"
+    elif mode == "trunk":
+        allowed = getattr(interface, "trunk_allowed_vlans", [])
+        allowed_text = ",".join(str(item) for item in allowed) or "all"
+        vlan = (
+            f"native VLAN {getattr(interface, 'native_vlan', 1)}; "
+            f"allowed {allowed_text}"
+        )
+    else:
+        vlan = "not applicable"
+
+    return {
+        "device": device_name,
+        "interface": interface_name,
+        "ip": interface.ip_address or "unassigned",
+        "mode": mode,
+        "vlan": vlan,
+        "status": interface.status,
+    }
+
+
+def start_packet_animation(path: list[str], protocol: str = "ICMP") -> None:
+    if len(path) < 2:
+        st.session_state.packet_animation = {}
+        return
+    st.session_state.packet_animation = {
+        "id": f"{time.time_ns()}",
+        "path": list(path),
+        "protocol": protocol,
+        "expires_at": time.time() + max(3.2, (len(path) - 2) * 0.55 + 3.2),
+    }
+
+
+def links_for_device(device_name: str) -> list[dict]:
+    return [
+        link
+        for link in st.session_state.links
+        if device_name in {link.get("source"), link.get("target")}
+    ]
+
+
+def disconnect_link(link_id: str) -> tuple[bool, str]:
+    link = next(
+        (
+            item
+            for item in st.session_state.links
+            if item.get("id") == link_id
+        ),
+        None,
+    )
+    if link is None:
+        return False, "The selected connection no longer exists."
+
+    source = link.get("source")
+    target = link.get("target")
+    source_if = link.get("source_if")
+    target_if = link.get("target_if")
+    label = link_label(link)
+
+    endpoints = (
+        (source, source_if, target, target_if),
+        (target, target_if, source, source_if),
+    )
+    for device_name, interface_name, peer_name, peer_interface in endpoints:
+        device = st.session_state.devices.get(device_name)
+        if device is None or interface_name not in device.interfaces:
+            continue
+        interface = device.interfaces[interface_name]
+        expected_peer = f"{peer_name}:{peer_interface}"
+        if interface.connected_to == expected_peer:
+            interface.connected_to = None
+
+    # Remove only this cable. Other parallel connections between the same
+    # device pair remain intact.
+    st.session_state.links = [
+        item
+        for item in st.session_state.links
+        if item.get("id") != link_id
+    ]
+    add_event(f"Disconnected {label}.")
+    return True, f"Disconnected {label}. Both interfaces are now unassigned."
 
 
 def connect_devices(source: str, target: str) -> None:
@@ -920,8 +1224,26 @@ def prompt(name: str) -> str:
         return f"{name}(config)#"
     if mode == "interface":
         return f"{name}(config-if-{st.session_state.cli_interfaces.get(name,'')})#"
+    if mode == "interface_range":
+        return f"{name}(config-if-range)#"
+    if mode == "vlan":
+        return f"{name}(config-vlan)#"
+    if mode == "router":
+        return f"{name}(config-router)#"
+    if mode == "route_map":
+        return f"{name}(config-route-map)#"
+    if mode == "dhcp":
+        return f"{name}(dhcp-config)#"
 
     return f"{name}>"
+
+
+def selected_cli_interfaces(name: str) -> list[str]:
+    mode = st.session_state.cli_modes.get(name, "user")
+    if mode == "interface_range":
+        return st.session_state.cli_interface_ranges.get(name, [])
+    interface_name = st.session_state.cli_interfaces.get(name)
+    return [interface_name] if interface_name else []
 
 
 def boot(name: str) -> None:
@@ -967,7 +1289,10 @@ def show_ip_interface_brief(device: Device) -> str:
 
 
 def show_ip_route(device: Device) -> str:
-    rows = ["Codes: C - connected, S - static", ""]
+    rows = [
+        "Codes: C - connected, S - static, R - RIP, O - OSPF, D - EIGRP, B - BGP",
+        "",
+    ]
 
     for interface in device.interfaces.values():
         if interface.ip_address and interface.status == "up":
@@ -980,7 +1305,8 @@ def show_ip_route(device: Device) -> str:
                 pass
 
     for network, next_hop in device.routing_table.items():
-        rows.append(f"S    {network} [1/0] via {next_hop}")
+        distance = device.route_distances.get(network, 1)
+        rows.append(f"S    {network} [{distance}/0] via {next_hop}")
 
     return "\n".join(rows)
 
@@ -988,20 +1314,141 @@ def show_ip_route(device: Device) -> str:
 def running_config(device: Device) -> str:
     rows = [f"hostname {device.name}", "!"]
 
+    if is_switch(device):
+        ensure_switch_defaults(device)
+        for vlan_id, vlan_name in sorted(device.vlans.items()):
+            if vlan_id in DEFAULT_VLANS:
+                continue
+            rows.extend([f"vlan {vlan_id}", f" name {vlan_name}", "!"])
+
     for interface in device.interfaces.values():
+        rows.append(f"interface {interface.name}")
+        if interface.description:
+            rows.append(f" description {interface.description}")
+        if interface.encapsulation_dot1q is not None:
+            rows.append(
+                f" encapsulation dot1Q {interface.encapsulation_dot1q}"
+                + (" native" if interface.encapsulation_native else "")
+            )
+        if is_switch(device) and not interface.name.lower().startswith("vlan"):
+            rows.append(f" switchport mode {interface.switchport_mode}")
+            if interface.switchport_mode == "access":
+                rows.append(f" switchport access vlan {interface.access_vlan}")
+            else:
+                rows.append(f" switchport trunk native vlan {interface.native_vlan}")
+                allowed = interface.trunk_allowed_vlans
+                if allowed:
+                    rows.append(
+                        " switchport trunk allowed vlan "
+                        + ",".join(map(str, allowed))
+                    )
+        elif interface.ip_address:
+            rows.append(f" ip address {interface.ip_address}")
+        if interface.ipv6_address:
+            rows.append(f" ipv6 address {interface.ipv6_address}")
+        if interface.ospfv3_process:
+            rows.append(
+                f" ipv6 ospf {interface.ospfv3_process} area {interface.ospfv3_area}"
+            )
+        if interface.name.lower().startswith("tunnel"):
+            if interface.tunnel_source:
+                rows.append(f" tunnel source {interface.tunnel_source}")
+            if interface.tunnel_destination:
+                rows.append(f" tunnel destination {interface.tunnel_destination}")
+            rows.append(f" tunnel mode {interface.tunnel_mode}")
+        if interface.ipsec_profile:
+                rows.append(
+                    f" tunnel protection ipsec profile {interface.ipsec_profile}"
+                )
+        if interface.access_group_in:
+            rows.append(f" ip access-group {interface.access_group_in} in")
+        if interface.access_group_out:
+            rows.append(f" ip access-group {interface.access_group_out} out")
+        if interface.nat_inside:
+            rows.append(" ip nat inside")
+        if interface.nat_outside:
+            rows.append(" ip nat outside")
         rows.extend(
             [
-                f"interface {interface.name}",
-                f" ip address {interface.ip_address or 'unassigned'}",
                 f" {'no shutdown' if interface.status == 'up' else 'shutdown'}",
                 "!",
             ]
         )
 
+    rows.extend(routing_running_config(device))
+    rows.extend(dhcp_running_config(device))
+    rows.extend(acl_running_config(device))
+    rows.extend(nat_running_config(device))
+    rows.extend(dns_running_config(device))
+
     for network, next_hop in device.routing_table.items():
-        rows.append(f"ip route {network} {next_hop}")
+        distance = device.route_distances.get(network, 1)
+        rows.append(
+            f"ip route {network} {next_hop}"
+            + (f" {distance}" if distance != 1 else "")
+        )
 
     return "\n".join(rows)
+
+
+def configuration_snapshot(device: Device) -> dict:
+    interface_configs = {}
+    for name, interface in device.interfaces.items():
+        values = asdict(interface)
+        values.pop("connected_to", None)
+        interface_configs[name] = values
+    return {
+        "name": device.name,
+        "interfaces": interface_configs,
+        "routing_table": copy.deepcopy(device.routing_table),
+        "default_gateway": device.default_gateway,
+        "dns_server": device.dns_server,
+        "vlans": copy.deepcopy(device.vlans),
+        "route_distances": copy.deepcopy(device.route_distances),
+        "routing_config": copy.deepcopy(device.routing_config),
+        "text": running_config(device),
+    }
+
+
+def save_startup_config(device: Device) -> None:
+    device.startup_config = configuration_snapshot(device)
+
+
+def restore_startup_config(device: Device) -> tuple[bool, str]:
+    snapshot = device.startup_config
+    if not snapshot:
+        return False, "% No startup configuration is present."
+
+    connections = {
+        name: interface.connected_to
+        for name, interface in device.interfaces.items()
+    }
+    saved_interfaces = snapshot.get("interfaces", {})
+    restored_interfaces = {}
+    for interface_name in set(device.interfaces) | set(saved_interfaces):
+        values = copy.deepcopy(saved_interfaces.get(interface_name, {}))
+        values["name"] = interface_name
+        values["connected_to"] = connections.get(interface_name)
+        restored_interfaces[interface_name] = Interface(**values)
+
+    device.interfaces = restored_interfaces
+    device.routing_table = copy.deepcopy(snapshot.get("routing_table", {}))
+    device.default_gateway = snapshot.get("default_gateway", "")
+    device.dns_server = snapshot.get("dns_server", "")
+    device.vlans = {
+        int(vlan): vlan_name
+        for vlan, vlan_name in copy.deepcopy(snapshot.get("vlans", {})).items()
+    }
+    device.route_distances = {
+        prefix: int(distance)
+        for prefix, distance in copy.deepcopy(
+            snapshot.get("route_distances", {})
+        ).items()
+    }
+    device.routing_config = copy.deepcopy(snapshot.get("routing_config", {}))
+    ensure_switch_defaults(device)
+    ensure_routing_defaults(device)
+    return True, "Startup configuration restored."
 
 
 
@@ -1037,6 +1484,8 @@ def show_interfaces(device: Device) -> str:
 
 
 def show_interfaces_status(device: Device) -> str:
+    if is_switch(device):
+        return show_switch_interfaces_status(device)
     lines = ["Port          Name        Status       Vlan       Duplex  Speed  Type"]
     for interface in device.interfaces.values():
         connected = "connected" if interface.connected_to else "notconnect"
@@ -1052,19 +1501,7 @@ def show_vlan_brief(device: Device) -> str:
     if device.device_type not in {"Switch", "Multilayer Switch"}:
         return "% VLAN database is not available on this device type."
 
-    ports = ", ".join(
-        interface.name
-        for interface in device.interfaces.values()
-        if not interface.name.lower().startswith("vlan")
-    ) or "none"
-
-    return (
-        "VLAN Name                             Status    Ports\n"
-        "---- -------------------------------- --------- -------------------------------\n"
-        f"1    default                          active    {ports}\n"
-        "1002 fddi-default                     act/unsup\n"
-        "1003 token-ring-default               act/unsup"
-    )
+    return show_switch_vlan_brief(device)
 
 
 def show_mac_address_table(device: Device) -> str:
@@ -1082,8 +1519,13 @@ def show_mac_address_table(device: Device) -> str:
     for interface in device.interfaces.values():
         if interface.connected_to:
             mac = f"00aa.00bb.{index:04x}"
+            vlan_id = (
+                interface.native_vlan
+                if interface.switchport_mode == "trunk"
+                else interface.access_vlan
+            )
             lines.append(
-                f"1       {mac}    DYNAMIC     {interface.name}"
+                f"{vlan_id:<7} {mac}    DYNAMIC     {interface.name}"
             )
             index += 1
 
@@ -1153,8 +1595,14 @@ def show_help(device: Device) -> str:
     common = [
         "arp                 ARP table",
         "cdp neighbors       CDP neighbor information",
+        "copy run start      Save running configuration",
+        "erase startup-config  Remove saved configuration",
         "interfaces          Interface information",
         "ip                  IP information",
+        "ping <ip>           Test IP connectivity",
+        "traceroute <ip>     Trace the routed path",
+        "write memory        Save running configuration",
+        "reload              Restore saved configuration",
         "running-config      Current operating configuration",
         "startup-config      Saved configuration",
         "version             System hardware and software status",
@@ -1164,6 +1612,8 @@ def show_help(device: Device) -> str:
         common.extend(
             [
                 "interfaces status   Interface switchport status",
+                "interfaces trunk    Operational trunk ports",
+                "interfaces <port> switchport  Detailed port VLAN mode",
                 "mac address-table   MAC forwarding table",
                 "spanning-tree       Spanning-tree information",
                 "vlan brief          VLAN status",
@@ -1185,13 +1635,36 @@ def command_catalog(device: Device, mode: str) -> list[str]:
         "enable",
         "exit",
         "help",
+        "ping ",
+        "ping -c 5 ",
+        "traceroute ",
+        "traceroute -m 30 ",
+        "tracert ",
+        "copy running-config startup-config",
+        "write memory",
+        "erase startup-config",
+        "reload",
         "show ?",
         "show arp",
+        "show access-lists",
         "show cdp neighbors",
         "show interfaces",
         "show ip ?",
         "show ip interface brief",
         "show ip route",
+        "show ip route static",
+        "show ip dhcp binding",
+        "show ip dhcp pool",
+        "show ip nat translations",
+        "show ip nat statistics",
+        "show hosts",
+        "clear ip nat translation *",
+        "show ip protocols",
+        "show ip ospf neighbor",
+        "show ipv6 ospf neighbor",
+        "show ip eigrp neighbors",
+        "show ip bgp summary",
+        "show route-map",
         "show running-config",
         "show startup-config",
         "show version",
@@ -1201,6 +1674,7 @@ def command_catalog(device: Device, mode: str) -> list[str]:
         commands.extend(
             [
                 "show interfaces status",
+                "show interfaces trunk",
                 "show mac address-table",
                 "show spanning-tree",
                 "show vlan brief",
@@ -1219,8 +1693,29 @@ def command_catalog(device: Device, mode: str) -> list[str]:
         commands.extend(
             [
                 "hostname ",
+                "access-list ",
+                "no access-list ",
+                "ip nat inside source static ",
+                "ip nat inside source list ",
+                "ip host ",
+                "no ip host ",
                 "interface ",
+                "interface range ",
                 "ip route ",
+                "ip dhcp excluded-address ",
+                "ip dhcp pool ",
+                "no ip dhcp pool ",
+                "ip routing",
+                "ipv6 unicast-routing",
+                "ip prefix-list ",
+                "route-map ",
+                "router rip",
+                "router ospf ",
+                "router ospf v3 ",
+                "router eigrp ",
+                "router bgp ",
+                "no vlan ",
+                "vlan ",
                 "end",
             ]
         )
@@ -1229,12 +1724,55 @@ def command_catalog(device: Device, mode: str) -> list[str]:
         commands.extend(
             [
                 "ip address ",
+                "ip access-group ",
+                "no ip access-group ",
+                "ip nat inside",
+                "ip nat outside",
+                "no ip nat inside",
+                "no ip nat outside",
+                "ipv6 address ",
+                "encapsulation dot1Q ",
+                "ipv6 ospf ",
+                "tunnel source ",
+                "tunnel destination ",
+                "tunnel mode gre ip",
+                "tunnel mode ipsec ipv4",
+                "description ",
+                "switchport mode access",
+                "switchport mode trunk",
+                "switchport access vlan ",
+                "switchport trunk native vlan ",
+                "switchport trunk allowed vlan ",
                 "shutdown",
                 "no shutdown",
                 "exit",
                 "end",
             ]
         )
+
+    if mode == "interface_range":
+        commands.extend(
+            [
+                "description ",
+                "switchport mode access",
+                "switchport mode trunk",
+                "switchport access vlan ",
+                "switchport trunk native vlan ",
+                "switchport trunk allowed vlan ",
+                "shutdown",
+                "no shutdown",
+                "exit",
+                "end",
+            ]
+        )
+
+    if mode == "dhcp":
+        commands.extend(
+            ["network ", "default-router ", "dns-server ", "lease ", "exit", "end"]
+        )
+
+    if mode == "vlan":
+        commands.extend(["name ", "no name", "exit", "end"])
 
     return sorted(set(commands))
 
@@ -1252,11 +1790,33 @@ def tab_matches(name: str, partial: str) -> list[str]:
     #   interface Gi0/<Tab> -> Gi0/0, Gi0/1
     if normalized.startswith("interface "):
         typed_interface = raw.split(maxsplit=1)[1] if " " in raw else ""
+        completion_aliases = {
+            "g": "Gi",
+            "gi": "Gi",
+            "gigabit": "Gi",
+            "f": "Fa",
+            "fa": "Fa",
+            "fast": "Fa",
+            "s": "S",
+            "se": "S",
+            "serial": "S",
+            "t": "Tunnel",
+            "tu": "Tunnel",
+            "tunnel": "Tunnel",
+            "v": "Vlan",
+            "vl": "Vlan",
+            "vlan": "Vlan",
+        }
+        normalized_interface = normalize_interface_name(typed_interface)
+        normalized_interface = completion_aliases.get(
+            typed_interface.lower(),
+            normalized_interface,
+        )
 
         return [
             f"interface {interface_name}"
             for interface_name in device.interfaces
-            if interface_name.startswith(typed_interface)
+            if interface_name.lower().startswith(normalized_interface.lower())
         ]
 
     # General Cisco command keywords remain case-insensitive.
@@ -1292,6 +1852,14 @@ def rename_device(old_name: str, new_name: str) -> str:
 
     if old_name in st.session_state.cli_interfaces:
         st.session_state.cli_interfaces[new_name] = st.session_state.cli_interfaces.pop(old_name)
+    if old_name in st.session_state.cli_interface_ranges:
+        st.session_state.cli_interface_ranges[new_name] = st.session_state.cli_interface_ranges.pop(old_name)
+    if old_name in st.session_state.cli_vlans:
+        st.session_state.cli_vlans[new_name] = st.session_state.cli_vlans.pop(old_name)
+    if old_name in st.session_state.cli_routing_contexts:
+        st.session_state.cli_routing_contexts[new_name] = st.session_state.cli_routing_contexts.pop(old_name)
+    if old_name in st.session_state.cli_route_map_contexts:
+        st.session_state.cli_route_map_contexts[new_name] = st.session_state.cli_route_map_contexts.pop(old_name)
 
     if old_name in st.session_state.cli_history:
         st.session_state.cli_history[new_name] = st.session_state.cli_history.pop(old_name)
@@ -1319,10 +1887,44 @@ def rename_device(old_name: str, new_name: str) -> str:
     return new_name
 
 
-def resolve_interface_case_sensitive(device: Device, requested: str) -> Optional[str]:
-    if requested in device.interfaces:
-        return requested
-    return None
+def normalize_interface_name(requested: str) -> str:
+    """Expand common Cisco interface abbreviations without changing numbers."""
+    requested = requested.strip()
+    lowered = requested.lower()
+    aliases = (
+        ("gigabitethernet", "Gi"),
+        ("gigabit", "Gi"),
+        ("gi", "Gi"),
+        ("g", "Gi"),
+        ("fastethernet", "Fa"),
+        ("fast", "Fa"),
+        ("fa", "Fa"),
+        ("f", "Fa"),
+        ("serial", "S"),
+        ("se", "S"),
+        ("s", "S"),
+        ("tunnel", "Tunnel"),
+        ("tu", "Tunnel"),
+        ("vlan", "Vlan"),
+    )
+    for prefix, canonical in aliases:
+        if lowered.startswith(prefix):
+            suffix = requested[len(prefix):]
+            if suffix and (suffix[0].isdigit() or suffix[0] in {"/", "."}):
+                return canonical + suffix
+    return requested
+
+
+def resolve_interface_name(device: Device, requested: str) -> Optional[str]:
+    normalized = normalize_interface_name(requested)
+    return next(
+        (
+            existing
+            for existing in device.interfaces
+            if existing.lower() == normalized.lower()
+        ),
+        None,
+    )
 
 PC_DEVICE_TYPES = {
     "PC",
@@ -1418,6 +2020,22 @@ def pc_apply_static_ip(
             "Use: ip <address> <mask> [gateway]",
         )
 
+    ok, message = validate_interface_address(
+        st.session_state.devices,
+        device.name,
+        interface.name,
+        str(ip_iface),
+    )
+    if not ok:
+        return False, message
+    if gateway:
+        existing_ip = interface.ip_address
+        interface.ip_address = str(ip_iface)
+        gateway_ok, gateway_message = validate_gateway(device, gateway)
+        interface.ip_address = existing_ip
+        if not gateway_ok:
+            return False, gateway_message
+
     interface.ip_address = str(ip_iface)
     interface.status = "up"
     device.default_gateway = gateway
@@ -1428,6 +2046,7 @@ def pc_apply_static_ip(
 def pc_ping_result(
     source_name: str,
     destination_ip: str,
+    source_ip: str = "",
 ) -> str:
     try:
         destination = ipaddress.ip_address(destination_ip)
@@ -1436,6 +2055,19 @@ def pc_ping_result(
 
     source_device = st.session_state.devices[source_name]
     source_if = primary_pc_interface(source_device)
+    if source_ip:
+        for interface in source_device.interfaces.values():
+            if not interface.ip_address:
+                continue
+            try:
+                configured_ip = str(
+                    ipaddress.ip_interface(interface.ip_address).ip
+                )
+            except ValueError:
+                continue
+            if configured_ip == source_ip:
+                source_if = interface
+                break
 
     if not source_if or not source_if.ip_address:
         return "PING failed: source PC has no IP address."
@@ -1503,10 +2135,16 @@ def pc_help() -> str:
         "ip <address> <mask> [gateway]    Configure static IPv4\n"
         "ipconfig                         Show IP configuration\n"
         "ipconfig /all                    Show detailed IP configuration\n"
+        "ipconfig /renew                  Obtain or renew a DHCP lease\n"
+        "ipconfig /release                Release the DHCP lease\n"
         "gateway <ip>                     Set default gateway\n"
         "dns <ip>                         Set DNS server\n"
-        "ping <ip>                        Test logical connectivity\n"
-        "tracert <ip>                     Trace logical path\n"
+        "dns add <name> <ip>              Add record on a Server\n"
+        "dns remove <name>                Remove record on a Server\n"
+        "dns show                         Show records on a Server\n"
+        "nslookup <name>                  Resolve a DNS hostname\n"
+        "ping <ip|name>                   Test logical connectivity\n"
+        "tracert <ip|name>                Trace logical path\n"
         "arp -a                           Show ARP entries\n"
         "route print                      Show PC routing table\n"
         "hostname                         Show PC hostname\n"
@@ -1519,6 +2157,65 @@ def execute_pc_cli(name: str, command: str) -> bool:
     device = st.session_state.devices[name]
     stripped = command.strip()
     lowered = stripped.lower()
+
+    if lowered.startswith("dns add ") or lowered.startswith("dns remove ") or lowered == "dns show":
+        if device.device_type not in {"Server", "Authentication Server"}:
+            append_cli(name, "DNS records can be hosted only on a server device.")
+            return True
+        handled, output = configure_server_record(device, stripped)
+        if handled:
+            append_cli(name, output)
+            return True
+
+    if lowered.startswith("nslookup "):
+        query = stripped.split(maxsplit=1)[1].strip()
+        ok, address, detail = resolve_name(
+            st.session_state.devices, st.session_state.links, name, query
+        )
+        if ok:
+            append_cli(name, f"Server: {device.dns_server or 'local'}\nName: {query}\nAddress: {address}")
+        else:
+            append_cli(name, f"*** DNS lookup failed: {detail}")
+        return True
+
+    if lowered == "ipconfig /renew":
+        interface = primary_pc_interface(device)
+        if interface is None:
+            append_cli(name, "DHCP failed: this device has no usable interface.")
+            return True
+        ok, message, lease = allocate_lease(
+            st.session_state.devices, st.session_state.links, name, interface.name
+        )
+        if not ok:
+            append_cli(name, message)
+            return True
+        interface.ip_address = f"{lease['address']}/{lease['prefixlen']}"
+        interface.status = "up"
+        device.default_gateway = lease["gateway"]
+        device.dns_server = lease["dns"]
+        append_cli(
+            name,
+            "Windows IP Configuration\n\n"
+            f"DHCP lease obtained from {lease['server']} ({lease['pool']}).\n"
+            f"IPv4 Address. . . . . . . . . . : {lease['address']}\n"
+            f"Default Gateway . . . . . . . . : {lease['gateway'] or 'None'}",
+        )
+        add_event(f"{name}: obtained DHCP address {lease['address']} from {lease['server']}.")
+        return True
+
+    if lowered == "ipconfig /release":
+        interface = primary_pc_interface(device)
+        if interface is None:
+            append_cli(name, "No interface is available to release.")
+            return True
+        previous = interface.ip_address.split("/")[0] if interface.ip_address else "unassigned"
+        release_lease(st.session_state.devices, name, interface.name)
+        interface.ip_address = ""
+        device.default_gateway = ""
+        device.dns_server = ""
+        append_cli(name, f"DHCP address {previous} released.")
+        add_event(f"{name}: released DHCP address {previous}.")
+        return True
 
     if lowered == "ipconfig":
         append_cli(name, pc_ipconfig(device, False))
@@ -1554,8 +2251,12 @@ def execute_pc_cli(name: str, command: str) -> bool:
 
         try:
             ipaddress.ip_address(value)
-            device.default_gateway = value
-            append_cli(name, f"Default gateway set to {value}.")
+            ok, message = validate_gateway(device, value)
+            if ok:
+                device.default_gateway = value
+                append_cli(name, f"Default gateway set to {value}.")
+            else:
+                append_cli(name, message)
         except ValueError:
             append_cli(name, "% Invalid gateway address.")
 
@@ -1574,7 +2275,13 @@ def execute_pc_cli(name: str, command: str) -> bool:
         return True
 
     if lowered.startswith("ping "):
-        destination = stripped.split(maxsplit=1)[1].strip()
+        query = stripped.split(maxsplit=1)[1].strip()
+        ok, destination, detail = resolve_name(
+            st.session_state.devices, st.session_state.links, name, query
+        )
+        if not ok:
+            append_cli(name, f"Ping request could not find host {query}: {detail}")
+            return True
         append_cli(
             name,
             pc_ping_result(name, destination),
@@ -1582,7 +2289,13 @@ def execute_pc_cli(name: str, command: str) -> bool:
         return True
 
     if lowered.startswith("tracert "):
-        destination = stripped.split(maxsplit=1)[1].strip()
+        query = stripped.split(maxsplit=1)[1].strip()
+        ok, destination, detail = resolve_name(
+            st.session_state.devices, st.session_state.links, name, query
+        )
+        if not ok:
+            append_cli(name, f"Unable to resolve {query}: {detail}")
+            return True
         append_cli(
             name,
             f"Tracing route to {destination}\n"
@@ -1629,8 +2342,203 @@ def execute_pc_cli(name: str, command: str) -> bool:
 
     return False
 
+
+def parse_console_ping(command: str) -> tuple[str, int, str]:
+    """Parse Cisco ping and the commonly used Linux-style -c option."""
+    values = command.split()
+    if not values or values[0].lower() != "ping":
+        return "", 0, "% Invalid ping command."
+
+    destination = ""
+    count = 5
+    index = 1
+
+    while index < len(values):
+        token = values[index]
+        lowered_token = token.lower()
+
+        if lowered_token in {"-c", "repeat"}:
+            if index + 1 >= len(values):
+                return "", 0, "% Ping count is required."
+            try:
+                count = int(values[index + 1])
+            except ValueError:
+                return "", 0, "% Ping count must be a number."
+            index += 2
+            continue
+
+        if destination:
+            return "", 0, "% Use: ping [-c <1-100>] <destination-ip>"
+        destination = token
+        index += 1
+
+    if not destination:
+        return "", 0, "% Use: ping [-c <1-100>] <destination-ip>"
+    if count < 1 or count > 100:
+        return "", 0, "% Ping count must be between 1 and 100."
+
+    try:
+        destination = str(ipaddress.ip_address(destination))
+    except ValueError:
+        return "", 0, f"% Invalid destination IP: {destination}"
+
+    return destination, count, ""
+
+
+def console_ping_result(
+    source_name: str,
+    destination_ip: str,
+    count: int,
+) -> str:
+    source_ip = _first_device_ip(source_name)
+    if source_ip == "0.0.0.0":
+        return (
+            f"% Unable to source ping: {source_name} has no configured IP address."
+        )
+    route_result = evaluate_route(
+        source_name,
+        source_ip,
+        destination_ip,
+        st.session_state.devices,
+        st.session_state.links,
+    )
+    reachable = route_result.reachable
+    if reachable:
+        start_packet_animation(route_result.path, "ICMP")
+    else:
+        st.session_state.packet_animation = {}
+    symbols = "!" * count if reachable else "." * count
+    received = count if reachable else 0
+    success_rate = int((received / count) * 100)
+
+    record_packet_analysis(
+        source_name,
+        destination_ip,
+        "Console Ping",
+        source_ip,
+    )
+    add_event(
+        f"Console ping: {source_name} ({source_ip}) → "
+        f"{destination_ip}, {count} probes"
+    )
+
+    output = [
+        f"Type escape sequence to abort.",
+        f"Sending {count}, 100-byte ICMP Echos to {destination_ip}, "
+        "timeout is 2 seconds:",
+        symbols,
+        f"Success rate is {success_rate} percent ({received}/{count})",
+    ]
+    if reachable:
+        output[-1] += ", round-trip min/avg/max = 1/1/2 ms"
+    else:
+        output.extend(["", f"% {route_result.reason}"])
+    return "\n".join(output)
+
+
+def parse_console_traceroute(command: str) -> tuple[str, int, str]:
+    """Parse Cisco traceroute plus familiar -m maximum-hop syntax."""
+    values = command.split()
+    if not values or values[0].lower() not in {"traceroute", "tracert"}:
+        return "", 0, "% Invalid traceroute command."
+
+    destination = ""
+    max_hops = 30
+    index = 1
+    while index < len(values):
+        token = values[index]
+        if token.lower() in {"-m", "ttl"}:
+            if index + 1 >= len(values):
+                return "", 0, "% Maximum hop count is required."
+            try:
+                max_hops = int(values[index + 1])
+            except ValueError:
+                return "", 0, "% Maximum hop count must be a number."
+            index += 2
+            continue
+        if destination:
+            return "", 0, "% Use: traceroute [-m <1-64>] <destination-ip>"
+        destination = token
+        index += 1
+
+    if not destination:
+        return "", 0, "% Use: traceroute [-m <1-64>] <destination-ip>"
+    if not 1 <= max_hops <= 64:
+        return "", 0, "% Maximum hop count must be between 1 and 64."
+    try:
+        destination = str(ipaddress.ip_address(destination))
+    except ValueError:
+        return "", 0, f"% Invalid destination IP: {destination}"
+    return destination, max_hops, ""
+
+
+def console_traceroute_result(
+    source_name: str,
+    destination_ip: str,
+    max_hops: int,
+) -> str:
+    source_ip = _first_device_ip(source_name)
+    if source_ip == "0.0.0.0":
+        return (
+            f"% Unable to source traceroute: {source_name} has no configured IP address."
+        )
+
+    route_result = evaluate_route(
+        source_name,
+        source_ip,
+        destination_ip,
+        st.session_state.devices,
+        st.session_state.links,
+    )
+    visible_path = route_result.path[1:max_hops + 1]
+    lines = [
+        f"Type escape sequence to abort.",
+        f"Tracing the route to {destination_ip}",
+        "",
+    ]
+    for hop_number, hop_name in enumerate(visible_path, start=1):
+        hop_ip = _first_device_ip(hop_name)
+        lines.append(
+            f"{hop_number:<3} {hop_ip:<15} 1 msec  1 msec  2 msec  ({hop_name})"
+        )
+
+    if route_result.reachable and len(route_result.path) - 1 <= max_hops:
+        start_packet_animation(route_result.path, "ICMP Traceroute")
+        lines.extend(["", "Trace complete."])
+    elif route_result.reachable:
+        st.session_state.packet_animation = {}
+        lines.extend(["", f"Maximum hop count {max_hops} reached."])
+    else:
+        st.session_state.packet_animation = {}
+        lines.extend(["", f"% Trace failed: {route_result.reason}"])
+        lines.extend(f"  {decision}" for decision in route_result.decisions)
+
+    record_packet_analysis(
+        source_name,
+        destination_ip,
+        "Console Traceroute",
+        source_ip,
+    )
+    add_event(
+        f"Console traceroute: {source_name} ({source_ip}) → "
+        f"{destination_ip}, maximum {max_hops} hops"
+    )
+    return "\n".join(lines)
+
 def execute_cli(name: str, command: str) -> None:
-    command = command.strip()
+    # A terminal paste can contain a complete configuration block. Execute
+    # each non-empty line in order so CLI mode changes apply to the next line.
+    pasted_commands = [
+        line.strip()
+        for line in command.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        if line.strip()
+    ]
+    if len(pasted_commands) > 1:
+        for pasted_command in pasted_commands:
+            execute_cli(name, pasted_command)
+        return
+
+    command = pasted_commands[0] if pasted_commands else ""
     device = st.session_state.devices[name]
     mode = st.session_state.cli_modes.get(name, "user")
 
@@ -1664,6 +2572,197 @@ def execute_cli(name: str, command: str) -> None:
     lowered = command.lower()
     words = command.split()
 
+    routing_context = st.session_state.cli_routing_contexts.setdefault(name, {})
+    route_map_context = st.session_state.cli_route_map_contexts.setdefault(name, {})
+    dhcp_context = st.session_state.cli_dhcp_contexts.setdefault(name, {})
+
+    show_result = show_routing_summary(device, command)
+    if show_result.handled:
+        if show_result.output:
+            append_cli(name, show_result.output)
+        return
+
+    if lowered.startswith("ping"):
+        if mode not in {"user", "privileged"}:
+            append_cli(name, "% Ping is available in EXEC mode. Use 'end' first.")
+            return
+        query = command.split()[-1]
+        ok, resolved, detail = resolve_name(st.session_state.devices, st.session_state.links, name, query)
+        if not ok:
+            append_cli(name, f"% Unknown host {query}: {detail}")
+            return
+        resolved_command = " ".join(command.split()[:-1] + [resolved])
+        destination_ip, count, error = parse_console_ping(resolved_command)
+        if error:
+            append_cli(name, error)
+            return
+        append_cli(
+            name,
+            console_ping_result(name, destination_ip, count),
+        )
+        return
+
+    if lowered.startswith("traceroute") or lowered.startswith("tracert"):
+        if mode not in {"user", "privileged"}:
+            append_cli(
+                name,
+                "% Traceroute is available in EXEC mode. Use 'end' first.",
+            )
+            return
+        query = command.split()[-1]
+        ok, resolved, detail = resolve_name(st.session_state.devices, st.session_state.links, name, query)
+        if not ok:
+            append_cli(name, f"% Unknown host {query}: {detail}")
+            return
+        resolved_command = " ".join(command.split()[:-1] + [resolved])
+        destination_ip, max_hops, error = parse_console_traceroute(resolved_command)
+        if error:
+            append_cli(name, error)
+            return
+        append_cli(
+            name,
+            console_traceroute_result(name, destination_ip, max_hops),
+        )
+        return
+
+    if lowered in {
+        "copy running-config startup-config",
+        "copy run start",
+        "write memory",
+        "wr mem",
+        "wr",
+    }:
+        if mode != "privileged":
+            append_cli(name, "% Privileged EXEC mode required.")
+            return
+        save_startup_config(device)
+        if lowered.startswith("copy"):
+            append_cli(
+                name,
+                "Destination filename [startup-config]?\n"
+                "Building configuration...\n[OK]",
+            )
+        else:
+            append_cli(name, "Building configuration...\n[OK]")
+        add_event(f"{name}: running configuration saved to startup-config.")
+        return
+
+    if lowered in {"erase startup-config", "write erase"}:
+        if mode != "privileged":
+            append_cli(name, "% Privileged EXEC mode required.")
+            return
+        device.startup_config = {}
+        append_cli(
+            name,
+            "Erasing the nvram filesystem will remove all configuration files!\n[OK]",
+        )
+        add_event(f"{name}: startup configuration erased.")
+        return
+
+    if lowered in {"reload", "reload now"}:
+        if mode != "privileged":
+            append_cli(name, "% Privileged EXEC mode required.")
+            return
+        ok, message = restore_startup_config(device)
+        if not ok:
+            append_cli(name, message)
+            return
+        st.session_state.cli_modes[name] = "user"
+        st.session_state.cli_interfaces.pop(name, None)
+        st.session_state.cli_interface_ranges.pop(name, None)
+        st.session_state.cli_vlans.pop(name, None)
+        st.session_state.cli_routing_contexts[name] = {}
+        st.session_state.cli_route_map_contexts[name] = {}
+        st.session_state.cli_dhcp_contexts[name] = {}
+        append_cli(
+            name,
+            "Proceed with reload? [confirm]\nReloading...\n"
+            "System Bootstrap, PeerNet Virtual IOS\n" + message,
+        )
+        add_event(f"{name}: reloaded from startup configuration.")
+        return
+
+    if mode == "router":
+        result = configure_router_mode(device, command, routing_context)
+        if result.handled:
+            if result.mode:
+                st.session_state.cli_modes[name] = result.mode
+            if result.output:
+                append_cli(name, result.output)
+            return
+
+    if mode == "route_map":
+        result = configure_route_map_mode(device, command, route_map_context)
+        if result.handled:
+            if result.mode:
+                st.session_state.cli_modes[name] = result.mode
+            if result.output:
+                append_cli(name, result.output)
+            return
+
+    if mode == "dhcp":
+        handled, output, next_mode = configure_dhcp_pool(device, command, dhcp_context)
+        if handled:
+            if next_mode:
+                st.session_state.cli_modes[name] = next_mode
+            if output:
+                append_cli(name, output)
+            return
+
+    if mode == "config":
+        handled, output = configure_ip_host(device, command)
+        if handled:
+            if output:
+                append_cli(name, output)
+            return
+        handled, output = configure_nat_global(device, command)
+        if handled:
+            if output:
+                append_cli(name, output)
+            return
+        handled, output = configure_access_list(device, command)
+        if handled:
+            if output:
+                append_cli(name, output)
+            return
+        handled, output, next_mode = configure_dhcp_global(device, command, dhcp_context)
+        if handled:
+            if not is_routing_device(device):
+                append_cli(name, "% DHCP service is supported on routers and multilayer switches.")
+                return
+            if next_mode:
+                st.session_state.cli_modes[name] = next_mode
+            if output:
+                append_cli(name, output)
+            return
+        if lowered == "ip routing":
+            if device.device_type != "Multilayer Switch":
+                append_cli(name, "% 'ip routing' is intended for a multilayer switch.")
+            else:
+                ensure_routing_defaults(device)["ip_routing"] = True
+            return
+        if lowered == "no ip routing":
+            ensure_routing_defaults(device)["ip_routing"] = False
+            return
+        if lowered == "ipv6 unicast-routing":
+            ensure_routing_defaults(device)["ipv6_unicast_routing"] = True
+            return
+        if lowered == "no ipv6 unicast-routing":
+            ensure_routing_defaults(device)["ipv6_unicast_routing"] = False
+            return
+
+        for routing_result in (
+            configure_static_route(device, command),
+            enter_router_mode(device, command, routing_context),
+            configure_policy(device, command, route_map_context),
+        ):
+            if routing_result.handled:
+                if routing_result.mode:
+                    st.session_state.cli_modes[name] = routing_result.mode
+                if routing_result.output:
+                    append_cli(name, routing_result.output)
+                return
+
     if lowered in {"enable", "en"}:
         st.session_state.cli_modes[name] = "privileged"
         return
@@ -1694,46 +2793,141 @@ def execute_cli(name: str, command: str) -> None:
             st.rerun()
         return
 
+    if lowered.startswith("vlan "):
+        if mode != "config":
+            append_cli(name, "% Enter global configuration mode first.")
+            return
+        if not is_switch(device):
+            append_cli(name, "% VLAN configuration is available only on switches.")
+            return
+        values = command.split()
+        if len(values) != 2:
+            append_cli(name, "% Use: vlan <1-4094>")
+            return
+        vlan_id, error = validate_vlan_id(values[1])
+        if error or vlan_id is None:
+            append_cli(name, error or "% Invalid VLAN ID.")
+            return
+        ensure_switch_defaults(device)
+        device.vlans.setdefault(vlan_id, f"VLAN{vlan_id:04d}")
+        st.session_state.cli_modes[name] = "vlan"
+        st.session_state.cli_vlans[name] = vlan_id
+        return
+
+    if lowered.startswith("no vlan "):
+        if mode != "config":
+            append_cli(name, "% Enter global configuration mode first.")
+            return
+        if not is_switch(device):
+            append_cli(name, "% VLAN configuration is available only on switches.")
+            return
+        values = command.split()
+        if len(values) != 3:
+            append_cli(name, "% Use: no vlan <1-4094>")
+            return
+        vlan_id, error = validate_vlan_id(values[2])
+        if error or vlan_id is None:
+            append_cli(name, error or "% Invalid VLAN ID.")
+            return
+        ensure_switch_defaults(device)
+        if vlan_id in DEFAULT_VLANS:
+            append_cli(name, f"% Default VLAN {vlan_id} cannot be removed.")
+            return
+        if vlan_id not in device.vlans:
+            append_cli(name, f"% VLAN {vlan_id} does not exist.")
+            return
+        del device.vlans[vlan_id]
+        for interface in device.interfaces.values():
+            if interface.access_vlan == vlan_id:
+                interface.access_vlan = 1
+            interface.trunk_allowed_vlans = [
+                allowed
+                for allowed in interface.trunk_allowed_vlans
+                if allowed != vlan_id
+            ]
+            if interface.native_vlan == vlan_id:
+                interface.native_vlan = 1
+        return
+
+    if mode == "vlan" and lowered.startswith("name "):
+        vlan_name = command.split(maxsplit=1)[1].strip()
+        if not vlan_name or len(vlan_name) > 32 or " " in vlan_name:
+            append_cli(name, "% VLAN name must be 1-32 characters without spaces.")
+            return
+        vlan_id = st.session_state.cli_vlans[name]
+        device.vlans[vlan_id] = vlan_name
+        return
+
+    if mode == "vlan" and lowered == "no name":
+        vlan_id = st.session_state.cli_vlans[name]
+        device.vlans[vlan_id] = f"VLAN{vlan_id:04d}"
+        return
+
+    if lowered.startswith("interface range "):
+        if mode not in {"config", "interface", "interface_range"}:
+            append_cli(name, "% Enter global configuration mode first.")
+            return
+        if not is_switch(device):
+            append_cli(name, "% Interface range is currently supported on switches.")
+            return
+        expression = command[len("interface range "):].strip()
+        interface_names, error = resolve_interface_range(device, expression)
+        if error or not interface_names:
+            append_cli(name, error or "% Invalid interface range.")
+            return
+        st.session_state.cli_modes[name] = "interface_range"
+        st.session_state.cli_interfaces.pop(name, None)
+        st.session_state.cli_interface_ranges[name] = interface_names
+        return
+
     if lowered.startswith("interface "):
         if mode not in {"config", "interface"}:
             append_cli(name, "% Enter global configuration mode first.")
             return
 
-        # Cisco command keyword is case-insensitive, but the simulator keeps
-        # interface identifiers exact/case-sensitive by design.
+        # Interface names accept canonical spelling, lowercase spelling, and
+        # common Cisco abbreviations such as g0/1, fa0/1, and s0/0/0.
         interface_name = command.split(maxsplit=1)[1].strip()
-        exact_interface = resolve_interface_case_sensitive(
+        exact_interface = resolve_interface_name(
             device,
             interface_name,
         )
 
-        if exact_interface is None:
-            case_match = next(
-                (
-                    existing
-                    for existing in device.interfaces
-                    if existing.lower() == interface_name.lower()
-                ),
-                None,
-            )
+        # Create logical routing interfaces on demand while keeping physical
+        # interface validation unchanged.
+        if exact_interface is None and is_routing_device(device):
+            logical_name = normalize_interface_name(interface_name)
+            if "." in logical_name:
+                parent_name = logical_name.rsplit(".", 1)[0]
+                if parent_name in device.interfaces and logical_name.rsplit(".", 1)[1].isdigit():
+                    device.interfaces[logical_name] = Interface(logical_name)
+                    exact_interface = logical_name
+            elif logical_name.lower().startswith("tunnel") and logical_name[6:].isdigit():
+                device.interfaces[logical_name] = Interface(logical_name)
+                exact_interface = logical_name
+            elif (
+                device.device_type == "Multilayer Switch"
+                and logical_name.lower().startswith("vlan")
+                and logical_name[4:].isdigit()
+            ):
+                vlan_id = int(logical_name[4:])
+                ensure_switch_defaults(device)
+                if vlan_id in device.vlans:
+                    device.interfaces[logical_name] = Interface(logical_name)
+                    exact_interface = logical_name
 
-            if case_match:
-                append_cli(
-                    name,
-                    f"% Invalid interface case '{interface_name}'. "
-                    f"Use exact interface name: {case_match}",
-                )
-            else:
-                append_cli(
-                    name,
-                    f"% Invalid interface '{interface_name}'.\n"
-                    f"Available interfaces: "
-                    f"{', '.join(device.interfaces.keys())}",
-                )
+        if exact_interface is None:
+            append_cli(
+                name,
+                f"% Invalid interface '{interface_name}'.\n"
+                f"Available interfaces: "
+                f"{', '.join(device.interfaces.keys())}",
+            )
             return
 
         st.session_state.cli_modes[name] = "interface"
         st.session_state.cli_interfaces[name] = exact_interface
+        st.session_state.cli_interface_ranges.pop(name, None)
         return
 
     if lowered.startswith("ip address "):
@@ -1760,27 +2954,80 @@ def execute_cli(name: str, command: str) -> None:
             return
 
         interface_name = st.session_state.cli_interfaces[name]
+        ok, message = validate_interface_address(
+            st.session_state.devices,
+            name,
+            interface_name,
+            cidr,
+        )
+        if not ok:
+            append_cli(name, message)
+            return
         device.interfaces[interface_name].ip_address = cidr
         return
 
+    if mode in {"interface", "interface_range"}:
+        handled, error = configure_nat_interface(
+            [device.interfaces[item] for item in selected_cli_interfaces(name)], command
+        )
+        if handled:
+            if error:
+                append_cli(name, error)
+            return
+
+    if mode in {"interface", "interface_range"}:
+        handled, error = configure_access_group(
+            [device.interfaces[item] for item in selected_cli_interfaces(name)], command
+        )
+        if handled:
+            if error:
+                append_cli(name, error)
+            return
+
+    if mode in {"interface", "interface_range"}:
+        routing_interfaces = [
+            device.interfaces[interface_name]
+            for interface_name in selected_cli_interfaces(name)
+        ]
+        routing_result = configure_interface_routing(
+            device,
+            routing_interfaces,
+            command,
+        )
+        if routing_result.handled:
+            if routing_result.output:
+                append_cli(name, routing_result.output)
+            return
+
+    if mode in {"interface", "interface_range"}:
+        handled, error = configure_switchports(
+            device,
+            selected_cli_interfaces(name),
+            command,
+        )
+        if handled:
+            if error:
+                append_cli(name, error)
+            return
+
     if lowered in {"shutdown", "shut"}:
-        if mode == "interface":
-            device.interfaces[
-                st.session_state.cli_interfaces[name]
-            ].status = "down"
+        if mode in {"interface", "interface_range"}:
+            for interface_name in selected_cli_interfaces(name):
+                device.interfaces[interface_name].status = "administratively down"
         return
 
     if lowered in {"no shutdown", "no shut"}:
-        if mode == "interface":
-            device.interfaces[
-                st.session_state.cli_interfaces[name]
-            ].status = "up"
+        if mode in {"interface", "interface_range"}:
+            for interface_name in selected_cli_interfaces(name):
+                device.interfaces[interface_name].status = "up"
         return
 
     if lowered == "exit":
-        if mode == "interface":
+        if mode in {"interface", "interface_range", "vlan"}:
             st.session_state.cli_modes[name] = "config"
             st.session_state.cli_interfaces.pop(name, None)
+            st.session_state.cli_interface_ranges.pop(name, None)
+            st.session_state.cli_vlans.pop(name, None)
         elif mode == "config":
             st.session_state.cli_modes[name] = "privileged"
         elif mode == "privileged":
@@ -1790,6 +3037,8 @@ def execute_cli(name: str, command: str) -> None:
     if lowered == "end":
         st.session_state.cli_modes[name] = "privileged"
         st.session_state.cli_interfaces.pop(name, None)
+        st.session_state.cli_interface_ranges.pop(name, None)
+        st.session_state.cli_vlans.pop(name, None)
         return
 
     if lowered.startswith("ip route "):
@@ -1833,12 +3082,59 @@ def execute_cli(name: str, command: str) -> None:
         append_cli(name, show_interfaces(device))
         return
 
+    if lowered in {"show access-lists", "show ip access-lists"}:
+        append_cli(name, show_access_lists(device))
+        return
+
+    if lowered == "show ip nat translations":
+        append_cli(name, show_nat_translations(device))
+        return
+
+    if lowered == "show ip nat statistics":
+        append_cli(name, show_nat_statistics(device))
+        return
+
+    if lowered == "show hosts":
+        append_cli(name, show_dns_records(device))
+        return
+
+    if lowered == "clear ip nat translation *":
+        clear_translations(device)
+        return
+
     if lowered == "show interfaces status":
         append_cli(name, show_interfaces_status(device))
         return
 
+    if lowered == "show interfaces trunk":
+        if not is_switch(device):
+            append_cli(name, "% Trunk information is available only on switches.")
+        else:
+            append_cli(name, show_interfaces_trunk(device))
+        return
+
+    if lowered.startswith("show interfaces ") and lowered.endswith(" switchport"):
+        if not is_switch(device):
+            append_cli(name, "% Switchport information is available only on switches.")
+            return
+        interface_name = command.split()[2]
+        exact_interface = resolve_interface_name(device, interface_name)
+        append_cli(
+            name,
+            show_interface_switchport(device, exact_interface or interface_name),
+        )
+        return
+
     if lowered == "show ip route":
         append_cli(name, show_ip_route(device))
+        return
+
+    if lowered == "show ip dhcp binding":
+        append_cli(name, show_dhcp_bindings(device))
+        return
+
+    if lowered == "show ip dhcp pool":
+        append_cli(name, show_dhcp_pools(device))
         return
 
     if lowered in {"show running-config", "show run"}:
@@ -1846,7 +3142,14 @@ def execute_cli(name: str, command: str) -> None:
         return
 
     if lowered == "show startup-config":
-        append_cli(name, running_config(device))
+        if device.startup_config:
+            append_cli(
+                name,
+                device.startup_config.get("text", "")
+                or "Startup configuration is empty.",
+            )
+        else:
+            append_cli(name, "% Startup configuration is not present.")
         return
 
     if lowered == "show version":
@@ -2000,18 +3303,18 @@ def record_packet_analysis(
     source: str,
     destination_ip: str,
     operation: str,
+    source_ip: str = "",
 ) -> None:
+    source_ip = source_ip or _first_device_ip(source)
     destination_device = _device_for_ip(destination_ip)
-    path = (
-        _topology_path(source, destination_device)
-        if destination_device
-        else [source]
+    route_result = evaluate_route(
+        source,
+        source_ip,
+        destination_ip,
+        st.session_state.devices,
+        st.session_state.links,
     )
-
-    if not path:
-        path = [source]
-
-    source_ip = _first_device_ip(source)
+    path = route_result.path or [source]
     timestamp = time.time()
     analyses = []
 
@@ -2260,6 +3563,16 @@ def restore_topology(payload: dict) -> None:
             routing_table=raw.get("routing_table", {}) or {},
             default_gateway=raw.get("default_gateway", "") or "",
             dns_server=raw.get("dns_server", "") or "",
+            vlans={
+                int(vlan): vlan_name
+                for vlan, vlan_name in (raw.get("vlans") or {}).items()
+            },
+            route_distances={
+                network: int(distance)
+                for network, distance in (raw.get("route_distances") or {}).items()
+            },
+            routing_config=raw.get("routing_config", {}) or {},
+            startup_config=raw.get("startup_config", {}) or {},
         )
 
         for if_name, raw_if in (raw.get("interfaces") or {}).items():
@@ -2268,8 +3581,38 @@ def restore_topology(payload: dict) -> None:
                 ip_address=raw_if.get("ip_address", ""),
                 status=raw_if.get("status", "up"),
                 connected_to=raw_if.get("connected_to"),
+                switchport_mode=raw_if.get("switchport_mode", "access"),
+                access_vlan=int(raw_if.get("access_vlan", 1)),
+                native_vlan=int(raw_if.get("native_vlan", 1)),
+                trunk_allowed_vlans=[
+                    int(vlan)
+                    for vlan in raw_if.get("trunk_allowed_vlans", [])
+                ],
+                description=raw_if.get("description", ""),
+                ipv6_address=raw_if.get("ipv6_address", ""),
+                encapsulation_dot1q=raw_if.get("encapsulation_dot1q"),
+                encapsulation_native=bool(raw_if.get("encapsulation_native", False)),
+                ospfv3_process=raw_if.get("ospfv3_process", ""),
+                ospfv3_area=raw_if.get("ospfv3_area", ""),
+                tunnel_source=raw_if.get("tunnel_source", ""),
+                tunnel_destination=raw_if.get("tunnel_destination", ""),
+                tunnel_mode=raw_if.get("tunnel_mode", "gre ip"),
+                ipsec_profile=raw_if.get("ipsec_profile", ""),
+                access_group_in=raw_if.get("access_group_in", ""),
+                access_group_out=raw_if.get("access_group_out", ""),
+                nat_inside=bool(raw_if.get("nat_inside", False)),
+                nat_outside=bool(raw_if.get("nat_outside", False)),
             )
 
+        # Older saved switches may contain only Fa0/1-Fa0/8. Add the new
+        # FastEthernet ports without replacing or changing any existing port.
+        if device.device_type == "Switch":
+            for port in range(1, 25):
+                port_name = f"Fa0/{port}"
+                device.interfaces.setdefault(port_name, Interface(port_name))
+
+        ensure_switch_defaults(device)
+        ensure_routing_defaults(device)
         devices[name] = device
 
     st.session_state.devices = devices
@@ -2277,6 +3620,11 @@ def restore_topology(payload: dict) -> None:
     st.session_state.positions = payload.get("positions", {}) or {}
     st.session_state.cli_modes = {name: "user" for name in devices}
     st.session_state.cli_interfaces = {}
+    st.session_state.cli_interface_ranges = {}
+    st.session_state.cli_vlans = {}
+    st.session_state.cli_routing_contexts = {}
+    st.session_state.cli_route_map_contexts = {}
+    st.session_state.cli_dhcp_contexts = {}
     st.session_state.cli_history = {name: [] for name in devices}
     st.session_state.booted = set()
     st.session_state.selected_device = (
@@ -2313,6 +3661,11 @@ def delete_device(device_name: str) -> None:
     st.session_state.positions.pop(device_name, None)
     st.session_state.cli_modes.pop(device_name, None)
     st.session_state.cli_interfaces.pop(device_name, None)
+    st.session_state.cli_interface_ranges.pop(device_name, None)
+    st.session_state.cli_vlans.pop(device_name, None)
+    st.session_state.cli_routing_contexts.pop(device_name, None)
+    st.session_state.cli_route_map_contexts.pop(device_name, None)
+    st.session_state.cli_dhcp_contexts.pop(device_name, None)
     st.session_state.cli_history.pop(device_name, None)
 
     if device_name in st.session_state.booted:
@@ -2332,6 +3685,11 @@ def clear_topology() -> None:
     st.session_state.positions = {}
     st.session_state.cli_modes = {}
     st.session_state.cli_interfaces = {}
+    st.session_state.cli_interface_ranges = {}
+    st.session_state.cli_vlans = {}
+    st.session_state.cli_routing_contexts = {}
+    st.session_state.cli_route_map_contexts = {}
+    st.session_state.cli_dhcp_contexts = {}
     st.session_state.cli_history = {}
     st.session_state.booted = set()
     st.session_state.selected_device = None
@@ -2378,11 +3736,24 @@ def node_payload() -> list[dict]:
         interface_labels = []
         for interface in device.interfaces.values():
             if interface.ip_address or interface.connected_to:
+                if device.device_type not in {"Switch", "Multilayer Switch"}:
+                    mode_text = "routed"
+                    vlan_text = "not applicable"
+                elif interface.switchport_mode == "trunk":
+                    mode_text = "trunk"
+                    vlan_text = f"trunk/native {interface.native_vlan}"
+                else:
+                    mode_text = "access"
+                    vlan_text = f"access VLAN {interface.access_vlan}"
                 interface_labels.append(
                     {
                         "name": interface.name,
                         "ip": interface.ip_address.split("/")[0] if interface.ip_address else "unassigned",
                         "connected": bool(interface.connected_to),
+                        "peer": interface.connected_to or "unassigned",
+                        "status": interface.status,
+                        "mode": mode_text,
+                        "vlan": vlan_text,
                     }
                 )
 
@@ -2404,8 +3775,42 @@ def node_payload() -> list[dict]:
 
 
 def edge_payload() -> list[dict]:
-    return [
-        {
+    animation = st.session_state.get("packet_animation", {})
+    if animation and animation.get("expires_at", 0) <= time.time():
+        animation = {}
+        st.session_state.packet_animation = {}
+    animation_path = animation.get("path", [])
+    animated_links: dict[str, tuple[int, bool]] = {}
+    for order, (path_source, path_target) in enumerate(
+        zip(animation_path, animation_path[1:])
+    ):
+        matching_link = next(
+            (
+                link
+                for link in st.session_state.links
+                if {link.get("source"), link.get("target")}
+                == {path_source, path_target}
+                and not link.get("forced_down")
+            ),
+            None,
+        )
+        if matching_link:
+            animated_links[matching_link["id"]] = (
+                order,
+                matching_link.get("source") != path_source,
+            )
+
+    result = []
+    for item in st.session_state.links:
+        status, status_reason = link_operational_status(item)
+        animation_data = animated_links.get(item["id"])
+        source_details = topology_interface_details(
+            item.get("source", ""), item.get("source_if", "")
+        )
+        target_details = topology_interface_details(
+            item.get("target", ""), item.get("target_if", "")
+        )
+        result.append({
             "id": item["id"],
             "source": item["source"],
             "target": item["target"],
@@ -2415,9 +3820,17 @@ def edge_payload() -> list[dict]:
                 "connector_type",
                 "Ethernet / Copper",
             ),
-        }
-        for item in st.session_state.links
-    ]
+            "status": status,
+            "status_reason": status_reason,
+            "animate": animation_data is not None and status == "up",
+            "animation_order": animation_data[0] if animation_data else 0,
+            "animation_reverse": animation_data[1] if animation_data else False,
+            "animation_id": animation.get("id", ""),
+            "animation_protocol": animation.get("protocol", "ICMP"),
+            "source_details": source_details,
+            "target_details": target_details,
+        })
+    return result
 
 
 def handle_canvas_event(event: Optional[dict]) -> None:
@@ -2450,6 +3863,7 @@ def handle_canvas_event(event: Optional[dict]) -> None:
         "configure",
         "open_console",
         "interfaces",
+        "disconnect_link",
         "add_interface",
         "delete_device",
     }:
@@ -2485,6 +3899,11 @@ def handle_canvas_event(event: Optional[dict]) -> None:
 
         elif action == "add_interface":
             st.session_state.dialog_mode = "add_interface"
+            st.session_state.dialog_device = node_id
+            st.rerun()
+
+        elif action == "disconnect_link":
+            st.session_state.dialog_mode = "disconnect_link"
             st.session_state.dialog_device = node_id
             st.rerun()
 
@@ -2681,6 +4100,66 @@ def interfaces_dialog(name: str) -> None:
 
     if st.button("Close", key=f"close_interfaces_{name}"):
         st.session_state.dialog_mode = None
+        st.rerun()
+
+
+@st.dialog("Disconnect Link", width="large")
+def disconnect_link_dialog(name: str) -> None:
+    device_links = links_for_device(name)
+    st.subheader(f"{name} — Connected interfaces")
+
+    if not device_links:
+        st.info(
+            f"{name} has no active connections. Its free interfaces are unassigned."
+        )
+    else:
+        link_map = {link["id"]: link for link in device_links}
+        selected_id = st.selectbox(
+            "Select the connection to remove",
+            list(link_map),
+            format_func=lambda link_id: link_label(link_map[link_id]),
+            key=f"dialog_disconnect_select_{name}",
+        )
+        selected_link = link_map[selected_id]
+        left_col, right_col = st.columns(2)
+        with left_col:
+            st.markdown("**Source device side**")
+            st.code(
+                f"{selected_link['source']}:"
+                f"{selected_link.get('source_if') or 'unassigned'}",
+                language="text",
+            )
+        with right_col:
+            st.markdown("**Destination device side**")
+            st.code(
+                f"{selected_link['target']}:"
+                f"{selected_link.get('target_if') or 'unassigned'}",
+                language="text",
+            )
+
+        confirmed = st.checkbox(
+            "I understand that only this cable will be removed.",
+            key=f"dialog_disconnect_confirm_{name}",
+        )
+        if st.button(
+            "Disconnect selected link",
+            type="primary",
+            use_container_width=True,
+            disabled=not confirmed,
+            key=f"dialog_disconnect_btn_{name}",
+        ):
+            ok, message = disconnect_link(selected_id)
+            if ok:
+                st.success(message)
+                st.session_state.dialog_mode = None
+                st.session_state.dialog_device = None
+                st.rerun()
+            else:
+                st.error(message)
+
+    if st.button("Close", key=f"close_disconnect_{name}"):
+        st.session_state.dialog_mode = None
+        st.session_state.dialog_device = None
         st.rerun()
 
 
@@ -3082,15 +4561,7 @@ with toolbar_col:
             selected = st.session_state.selected_device
 
             if selected in st.session_state.devices:
-                del st.session_state.devices[selected]
-                st.session_state.positions.pop(selected, None)
-                st.session_state.links = [
-                    link
-                    for link in st.session_state.links
-                    if selected
-                    not in {link["source"], link["target"]}
-                ]
-                st.session_state.selected_device = None
+                delete_device(selected)
                 st.rerun()
 
     with tool_cols[4]:
@@ -3123,14 +4594,13 @@ with canvas_col:
     )
 
 with right_col:
-    st.markdown(
-        '<div class="pn-right-card">',
-        unsafe_allow_html=True,
-    )
-
-    connect_tab, device_tab, end_tab, port_tab = st.tabs(
-        ["Connect", "Devices", "End Users", "Ports"]
-    )
+    # Match the full rendered topology card (canvas plus component spacing).
+    # Long tab content scrolls
+    # inside this panel instead of pushing the Console farther down the page.
+    with st.container(height=540, key="topology_side_panel"):
+        connect_tab, disconnect_tab, device_tab, end_tab, port_tab = st.tabs(
+            ["Connect", "Disconnect", "Devices", "End Users", "Ports"]
+        )
 
     with connect_tab:
         device_names = list(st.session_state.devices)
@@ -3214,6 +4684,10 @@ with right_col:
                 key="easy_connector_type",
             )
             st.session_state.connector_type = connector
+            st.markdown(
+                connector_preview_html(connector),
+                unsafe_allow_html=True,
+            )
 
             if source_if and target_if:
                 st.caption(
@@ -3241,6 +4715,78 @@ with right_col:
                         st.rerun()
                     else:
                         st.error(message)
+
+    with disconnect_tab:
+        if not st.session_state.links:
+            st.info("There are no active connections to remove.")
+        else:
+            disconnect_map = {
+                link["id"]: link
+                for link in st.session_state.links
+            }
+            disconnect_id = st.selectbox(
+                "Active connection",
+                list(disconnect_map),
+                format_func=lambda link_id: link_label(
+                    disconnect_map[link_id]
+                ),
+                key="easy_disconnect_link",
+            )
+            disconnect_item = disconnect_map[disconnect_id]
+            link_status, link_reason = link_operational_status(disconnect_item)
+            status_label = {
+                "up": "🟢 Up",
+                "down": "🔴 Down",
+                "admin-down": "🟠 Administratively down",
+            }[link_status]
+            st.caption(f"Link status: {status_label} — {link_reason}")
+            st.caption("Source device side")
+            st.code(
+                f"{disconnect_item['source']}:"
+                f"{disconnect_item.get('source_if') or 'unassigned'}",
+                language="text",
+            )
+            st.caption("Destination device side")
+            st.code(
+                f"{disconnect_item['target']}:"
+                f"{disconnect_item.get('target_if') or 'unassigned'}",
+                language="text",
+            )
+            if disconnect_item.get("forced_down"):
+                if st.button(
+                    "🛠 Restore Cable",
+                    use_container_width=True,
+                    key="restore_selected_link",
+                ):
+                    disconnect_item["forced_down"] = False
+                    add_event(f"Cable restored: {link_label(disconnect_item)}.")
+                    st.rerun()
+            else:
+                if st.button(
+                    "⚠ Simulate Cable Failure",
+                    use_container_width=True,
+                    key="fail_selected_link",
+                ):
+                    disconnect_item["forced_down"] = True
+                    add_event(f"Cable failure: {link_label(disconnect_item)}.")
+                    st.rerun()
+            confirm_disconnect = st.checkbox(
+                "Confirm removal of this cable",
+                key="easy_disconnect_confirm",
+            )
+            if st.button(
+                "⛓ Disconnect Link",
+                use_container_width=True,
+                type="primary",
+                disabled=not confirm_disconnect,
+                key="easy_disconnect_btn",
+            ):
+                ok, message = disconnect_link(disconnect_id)
+                if ok:
+                    st.success(message)
+                    st.rerun()
+                else:
+                    st.error(message)
 
     with device_tab:
         for item in DEVICE_GROUPS["Network Devices"]:
@@ -3313,19 +4859,21 @@ with right_col:
         else:
             st.info("Add a device first.")
 
-
-    st.markdown(
-        "</div>",
-        unsafe_allow_html=True,
-    )
-
-
 # Single interactive console plus network tools.
-console_tab, ping_tab, trace_tab, packet_tab, wireshark_tab, events_tab = st.tabs(
+(
+    console_tab,
+    ping_tab,
+    trace_tab,
+    validation_tab,
+    packet_tab,
+    wireshark_tab,
+    events_tab,
+) = st.tabs(
     [
         "Console",
         "Ping",
         "Traceroute",
+        "Validation",
         "Packet Analysis",
         "Wireshark",
         "Events",
@@ -3475,86 +5023,101 @@ with ping_tab:
             list(st.session_state.devices),
             key="ping_source",
         )
-        destination = st.text_input(
-            "Destination IP",
-            key="ping_destination",
-            placeholder="192.168.1.10",
-        )
+        source_ips = []
+        for interface in st.session_state.devices[source].interfaces.values():
+            if not interface.ip_address:
+                continue
+            try:
+                source_ips.append(
+                    str(ipaddress.ip_interface(interface.ip_address).ip)
+                )
+            except ValueError:
+                continue
 
-        if st.button(
+        ping_source_col, ping_destination_col = st.columns(2)
+        with ping_source_col:
+            source_ip = st.selectbox(
+                "Source IP",
+                source_ips or ["Unassigned"],
+                key="ping_source_ip",
+            )
+        with ping_destination_col:
+            destination = st.text_input(
+                "Destination IP",
+                key="ping_destination",
+                placeholder="192.168.1.10",
+            )
+
+        ping_run_col, ping_stop_col = st.columns(2)
+        run_ping_clicked = ping_run_col.button(
             "Run Ping",
             key="run_ping",
             type="primary",
+            use_container_width=True,
+        )
+        if ping_stop_col.button(
+            "⏹ Stop Ping",
+            key="stop_ping_animation",
+            use_container_width=True,
         ):
-            if destination.strip():
+            st.session_state.packet_animation = {}
+            add_event("Ping animation stopped by user.")
+            st.rerun()
+
+        if run_ping_clicked:
+            if source_ip == "Unassigned":
+                st.session_state.ping_output = (
+                    f"PING failed: {source} has no configured source IP."
+                )
+            elif destination.strip():
                 record_packet_analysis(
                     source,
                     destination.strip(),
                     "Ping",
+                    source_ip,
                 )
                 add_event(
-                    f"Ping started: {source} → {destination.strip()}"
+                    f"Ping started: {source} ({source_ip}) → "
+                    f"{destination.strip()}"
                 )
-            if not destination.strip():
+            if source_ip == "Unassigned":
+                pass
+            elif not destination.strip():
                 st.session_state.ping_output = (
                     "Please enter a destination IP address."
                 )
             elif source in st.session_state.devices:
-                source_device = st.session_state.devices[source]
-
-                if source_device.device_type in PC_DEVICE_TYPES:
-                    st.session_state.ping_output = pc_ping_result(
-                        source,
-                        destination.strip(),
+                route_result = evaluate_route(
+                    source,
+                    source_ip,
+                    destination.strip(),
+                    st.session_state.devices,
+                    st.session_state.links,
+                )
+                if route_result.reachable:
+                    start_packet_animation(route_result.path, "ICMP")
+                    st.session_state.ping_output = (
+                        f"PING {destination.strip()} from "
+                        f"{source_ip} ({source})\n"
+                        f"Route: {' → '.join(route_result.path)}\n"
+                        f"Reply from {destination.strip()}: "
+                        "bytes=32 time<1ms TTL=255\n"
+                        f"Reply from {destination.strip()}: "
+                        "bytes=32 time<1ms TTL=255\n\n"
+                        "Success rate is 100 percent (2/2)"
                     )
                 else:
-                    try:
-                        target_ip = ipaddress.ip_address(
-                            destination.strip()
-                        )
-                        found = False
-
-                        for device in st.session_state.devices.values():
-                            for interface in device.interfaces.values():
-                                if not interface.ip_address:
-                                    continue
-
-                                try:
-                                    configured_ip = ipaddress.ip_interface(
-                                        interface.ip_address
-                                    ).ip
-                                except ValueError:
-                                    continue
-
-                                if configured_ip == target_ip:
-                                    found = True
-                                    break
-
-                            if found:
-                                break
-
-                        if found:
-                            st.session_state.ping_output = (
-                                f"PING {destination.strip()} from {source}\n"
-                                f"Reply from {destination.strip()}: "
-                                "bytes=32 time<1ms TTL=255\n"
-                                f"Reply from {destination.strip()}: "
-                                "bytes=32 time<1ms TTL=255\n\n"
-                                "Success rate is 100 percent (2/2)"
-                            )
-                        else:
-                            st.session_state.ping_output = (
-                                f"PING {destination.strip()} from {source}\n"
-                                "Request timed out.\n"
-                                "Request timed out.\n\n"
-                                "Success rate is 0 percent (0/2)"
-                            )
-
-                    except ValueError:
-                        st.session_state.ping_output = (
-                            f"Invalid destination IP: "
-                            f"{destination.strip()}"
-                        )
+                    st.session_state.packet_animation = {}
+                    details = "\n".join(route_result.decisions)
+                    st.session_state.ping_output = (
+                        f"PING {destination.strip()} from "
+                        f"{source_ip} ({source})\n"
+                        "Request timed out.\nRequest timed out.\n\n"
+                        "Success rate is 0 percent (0/2)\n"
+                        f"Reason: {route_result.reason}"
+                        + (f"\n{details}" if details else "")
+                    )
+                st.rerun()
 
         if st.session_state.get("ping_output"):
             ping_title_col, ping_clear_col = st.columns([4, 1])
@@ -3585,146 +5148,102 @@ with trace_tab:
             list(st.session_state.devices),
             key="trace_source",
         )
-        destination = st.text_input(
-            "Destination IP",
-            key="trace_destination",
-            placeholder="192.168.1.10",
-        )
+        source_ips = []
+        for interface in st.session_state.devices[source].interfaces.values():
+            if not interface.ip_address:
+                continue
+            try:
+                source_ips.append(
+                    str(ipaddress.ip_interface(interface.ip_address).ip)
+                )
+            except ValueError:
+                continue
 
-        if st.button(
+        trace_source_col, trace_destination_col = st.columns(2)
+        with trace_source_col:
+            source_ip = st.selectbox(
+                "Source IP",
+                source_ips or ["Unassigned"],
+                key="trace_source_ip",
+            )
+        with trace_destination_col:
+            destination = st.text_input(
+                "Destination IP",
+                key="trace_destination",
+                placeholder="192.168.1.10",
+            )
+
+        trace_run_col, trace_stop_col = st.columns(2)
+        run_trace_clicked = trace_run_col.button(
             "Run Traceroute",
             key="run_trace",
             type="primary",
+            use_container_width=True,
+        )
+        if trace_stop_col.button(
+            "⏹ Stop Traceroute",
+            key="stop_trace_animation",
+            use_container_width=True,
         ):
-            if destination.strip():
+            st.session_state.packet_animation = {}
+            add_event("Traceroute animation stopped by user.")
+            st.rerun()
+
+        if run_trace_clicked:
+            if source_ip == "Unassigned":
+                st.session_state.traceroute_output = (
+                    f"Traceroute failed: {source} has no configured source IP."
+                )
+            elif destination.strip():
                 record_packet_analysis(
                     source,
                     destination.strip(),
                     "Traceroute",
+                    source_ip,
                 )
                 add_event(
-                    f"Traceroute started: {source} → {destination.strip()}"
+                    f"Traceroute started: {source} ({source_ip}) → "
+                    f"{destination.strip()}"
                 )
-            if not destination.strip():
+            if source_ip == "Unassigned":
+                pass
+            elif not destination.strip():
                 st.session_state.traceroute_output = (
                     "Please enter a destination IP address."
                 )
             else:
-                try:
-                    target_ip = ipaddress.ip_address(
-                        destination.strip()
+                route_result = evaluate_route(
+                    source,
+                    source_ip,
+                    destination.strip(),
+                    st.session_state.devices,
+                    st.session_state.links,
+                )
+                lines = [
+                    f"Tracing route from {source_ip} ({source}) to "
+                    f"{destination.strip()}",
+                    "",
+                ]
+                for hop_number, hop_name in enumerate(
+                    route_result.path[1:], start=1
+                ):
+                    hop_ip = _first_device_ip(hop_name)
+                    lines.append(
+                        f"{hop_number:<3} <1 ms   {hop_name} ({hop_ip})"
                     )
-
-                    destination_device = None
-
-                    for device_name, device in (
-                        st.session_state.devices.items()
-                    ):
-                        for interface in device.interfaces.values():
-                            if not interface.ip_address:
-                                continue
-
-                            try:
-                                configured_ip = ipaddress.ip_interface(
-                                    interface.ip_address
-                                ).ip
-                            except ValueError:
-                                continue
-
-                            if configured_ip == target_ip:
-                                destination_device = device_name
-                                break
-
-                        if destination_device:
-                            break
-
-                    if destination_device is None:
-                        st.session_state.traceroute_output = (
-                            f"Tracing route from {source} to "
-                            f"{destination.strip()}\n"
-                            "Destination not found in the current topology."
-                        )
-                    else:
-                        adjacency = {
-                            name: []
-                            for name in st.session_state.devices
-                        }
-
-                        for link in st.session_state.links:
-                            src = link.get("source")
-                            dst = link.get("target")
-
-                            if src in adjacency and dst in adjacency:
-                                adjacency[src].append(dst)
-                                adjacency[dst].append(src)
-
-                        queue = [(source, [source])]
-                        visited = {source}
-                        route = None
-
-                        while queue:
-                            current, path = queue.pop(0)
-
-                            if current == destination_device:
-                                route = path
-                                break
-
-                            for neighbor in adjacency.get(current, []):
-                                if neighbor not in visited:
-                                    visited.add(neighbor)
-                                    queue.append(
-                                        (
-                                            neighbor,
-                                            path + [neighbor],
-                                        )
-                                    )
-
-                        if route:
-                            lines = [
-                                f"Tracing route from {source} to "
-                                f"{destination.strip()}",
-                                "",
-                            ]
-
-                            for hop_number, hop_name in enumerate(
-                                route[1:],
-                                start=1,
-                            ):
-                                hop_ip = "unassigned"
-
-                                for interface in (
-                                    st.session_state.devices[
-                                        hop_name
-                                    ].interfaces.values()
-                                ):
-                                    if interface.ip_address:
-                                        hop_ip = (
-                                            interface.ip_address
-                                            .split("/")[0]
-                                        )
-                                        break
-
-                                lines.append(
-                                    f"{hop_number:<3} <1 ms   "
-                                    f"{hop_name} ({hop_ip})"
-                                )
-
-                            lines.extend(["", "Trace complete."])
-                            st.session_state.traceroute_output = (
-                                "\n".join(lines)
-                            )
-                        else:
-                            st.session_state.traceroute_output = (
-                                f"Tracing route from {source} to "
-                                f"{destination.strip()}\n"
-                                "No logical path found in the current topology."
-                            )
-
-                except ValueError:
-                    st.session_state.traceroute_output = (
-                        f"Invalid destination IP: "
-                        f"{destination.strip()}"
+                if route_result.reachable:
+                    start_packet_animation(route_result.path, "ICMP Traceroute")
+                    lines.extend(["", "Trace complete."])
+                else:
+                    st.session_state.packet_animation = {}
+                    lines.extend(["", f"Trace failed: {route_result.reason}"])
+                if route_result.decisions:
+                    lines.extend(["", "Routing decisions:"])
+                    lines.extend(
+                        f"  {decision}" for decision in route_result.decisions
                     )
+                st.session_state.traceroute_output = "\n".join(lines)
+                st.rerun()
 
         if st.session_state.get("traceroute_output"):
             trace_title_col, trace_clear_col = st.columns([4, 1])
@@ -3747,6 +5266,28 @@ with trace_tab:
             )
     else:
         st.info("Add devices first.")
+
+with validation_tab:
+    st.subheader("Configuration Validation")
+    st.caption(
+        "Checks duplicate IPs, gateways, masks, overlapping networks, "
+        "VLAN references, and router subinterface encapsulation."
+    )
+    issues = audit_topology(st.session_state.devices)
+    if not issues:
+        st.success("No configuration issues detected.")
+    else:
+        error_count = sum(issue.severity == "error" for issue in issues)
+        warning_count = len(issues) - error_count
+        st.write(f"Errors: **{error_count}** · Warnings: **{warning_count}**")
+        for issue in issues:
+            message = (
+                f"{issue.device}:{issue.interface} — {issue.message}"
+            )
+            if issue.severity == "error":
+                st.error(message)
+            else:
+                st.warning(message)
 
 with packet_tab:
     packet_title_col, packet_clear_col = st.columns([4, 1])
@@ -3919,3 +5460,9 @@ if (
     and st.session_state.dialog_device in st.session_state.devices
 ):
     interfaces_dialog(st.session_state.dialog_device)
+
+if (
+    st.session_state.dialog_mode == "disconnect_link"
+    and st.session_state.dialog_device in st.session_state.devices
+):
+    disconnect_link_dialog(st.session_state.dialog_device)

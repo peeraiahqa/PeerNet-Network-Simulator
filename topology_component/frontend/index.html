@@ -13,12 +13,17 @@ html,body{overflow:hidden;margin:0;width:100%;height:100%;overflow:hidden;font-f
   background-size:18px 18px
 }
 svg{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
-.edge{stroke:#111827;stroke-width:2}
+.edge{fill:none;stroke:#111827;stroke-width:2}
 .edge.wired{stroke:#111827}
 .edge.optical{stroke:#7c3aed;stroke-width:3}
 .edge.serial{stroke:#f59e0b;stroke-width:2.5;stroke-dasharray:8 5}
 .edge.wireless{stroke:#0ea5e9;stroke-width:2.5;stroke-dasharray:3 6}
 .edge-dot{fill:#22c55e;stroke:white;stroke-width:1.5}
+.edge.status-down{stroke:#dc2626}
+.edge.status-admin-down{stroke:#f59e0b}
+.edge-dot.status-down{fill:#dc2626}
+.edge-dot.status-admin-down{fill:#f59e0b}
+.packet-pulse{fill:#2563eb;stroke:#fff;stroke-width:2;filter:drop-shadow(0 0 4px #60a5fa)}
 .edge-label{
   fill:#334155;font-size:9px;font-family:Inter,Segoe UI,Arial,sans-serif;
   paint-order:stroke;stroke:#fff;stroke-width:3px;stroke-linejoin:round
@@ -50,6 +55,8 @@ svg{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
   white-space:nowrap;box-shadow:0 2px 5px rgba(15,23,42,.08)
 }
 .node .if-label.connected{border-color:#86efac;background:#f0fdf4;color:#166534}
+.node .if-label.down{border-color:#fecaca;background:#fef2f2;color:#b91c1c}
+.node .if-label.admin-down{border-color:#fed7aa;background:#fff7ed;color:#c2410c}
 .handle{
   position:absolute;left:50%;bottom:-8px;transform:translateX(-50%);
   width:12px;height:12px;border-radius:50%;
@@ -130,15 +137,41 @@ function render(){
   canvas.className="canvas"
 
   const svg=document.createElementNS("http://www.w3.org/2000/svg","svg")
+  const edgeGroups=new Map()
+
+  ;(args.edges||[]).forEach(e=>{
+    const pairKey=[e.source,e.target].sort().join("::")
+    if(!edgeGroups.has(pairKey))edgeGroups.set(pairKey,[])
+    edgeGroups.get(pairKey).push(e)
+  })
+
   ;(args.edges||[]).forEach(e=>{
     const a=(args.nodes||[]).find(n=>n.id===e.source)
     const b=(args.nodes||[]).find(n=>n.id===e.target)
     if(!a||!b)return
-    const line=document.createElementNS("http://www.w3.org/2000/svg","line")
-    line.setAttribute("x1",a.position.x)
-    line.setAttribute("y1",a.position.y)
-    line.setAttribute("x2",b.position.x)
-    line.setAttribute("y2",b.position.y)
+
+    const pairKey=[e.source,e.target].sort().join("::")
+    const parallelEdges=edgeGroups.get(pairKey)||[e]
+    const edgeIndex=parallelEdges.indexOf(e)
+    const centeredIndex=edgeIndex-(parallelEdges.length-1)/2
+    const direction=e.source<=e.target ? 1 : -1
+    const curveOffset=centeredIndex*34*direction
+
+    const dx=b.position.x-a.position.x
+    const dy=b.position.y-a.position.y
+    const distance=Math.max(Math.hypot(dx,dy),1)
+    const normalX=-dy/distance
+    const normalY=dx/distance
+    const middleX=(a.position.x+b.position.x)/2
+    const middleY=(a.position.y+b.position.y)/2
+    const controlX=middleX+normalX*curveOffset
+    const controlY=middleY+normalY*curveOffset
+
+    const path=document.createElementNS("http://www.w3.org/2000/svg","path")
+    path.setAttribute(
+      "d",
+      `M ${a.position.x} ${a.position.y} Q ${controlX} ${controlY} ${b.position.x} ${b.position.y}`
+    )
 
     const connectorClass = (
       e.connector_type==="Fiber / Optical" ? "optical" :
@@ -147,8 +180,47 @@ function render(){
       "wired"
     )
 
-    line.setAttribute("class","edge "+connectorClass)
-    svg.appendChild(line)
+    const statusClass = (
+      e.status==="admin-down" ? "status-admin-down" :
+      e.status==="down" ? "status-down" : "status-up"
+    )
+    path.setAttribute("class","edge "+connectorClass+" "+statusClass)
+    path.setAttribute("data-link-id",e.id||"")
+    const title=document.createElementNS("http://www.w3.org/2000/svg","title")
+    const sd=e.source_details||{}
+    const td=e.target_details||{}
+    title.textContent=[
+      "Connector: "+(e.connector_type||"Ethernet / Copper"),
+      "Link status: "+(e.status||"up")+" — "+(e.status_reason||""),
+      (sd.device||e.source)+":"+(sd.interface||e.source_if)+
+        " | IP "+(sd.ip||"unassigned")+" | "+(sd.mode||"unknown")+
+        " | "+(sd.vlan||"unassigned")+" | "+(sd.status||"unknown"),
+      (td.device||e.target)+":"+(td.interface||e.target_if)+
+        " | IP "+(td.ip||"unassigned")+" | "+(td.mode||"unknown")+
+        " | "+(td.vlan||"unassigned")+" | "+(td.status||"unknown")
+    ].join("\n")
+    path.appendChild(title)
+    svg.appendChild(path)
+
+    if(e.animate){
+      const packet=document.createElementNS("http://www.w3.org/2000/svg","circle")
+      packet.setAttribute("r","6")
+      packet.setAttribute("class","packet-pulse")
+      const packetTitle=document.createElementNS("http://www.w3.org/2000/svg","title")
+      packetTitle.textContent=(e.animation_protocol||"ICMP")+" packet"
+      packet.appendChild(packetTitle)
+      const motion=document.createElementNS("http://www.w3.org/2000/svg","animateMotion")
+      const motionPath=e.animation_reverse
+        ? `M ${b.position.x} ${b.position.y} Q ${controlX} ${controlY} ${a.position.x} ${a.position.y}`
+        : `M ${a.position.x} ${a.position.y} Q ${controlX} ${controlY} ${b.position.x} ${b.position.y}`
+      motion.setAttribute("path",motionPath)
+      motion.setAttribute("dur","0.9s")
+      motion.setAttribute("begin",(Number(e.animation_order||0)*0.55)+"s")
+      motion.setAttribute("repeatCount","3")
+      motion.setAttribute("fill","freeze")
+      packet.appendChild(motion)
+      svg.appendChild(packet)
+    }
 
     if(e.source_if || e.target_if){
       const label=document.createElementNS(
@@ -157,28 +229,32 @@ function render(){
       )
       label.setAttribute(
         "x",
-        (a.position.x+b.position.x)/2
+        (a.position.x+2*controlX+b.position.x)/4
       )
       label.setAttribute(
         "y",
-        (a.position.y+b.position.y)/2 - 7
+        (a.position.y+2*controlY+b.position.y)/4 - 7
       )
       label.setAttribute("text-anchor","middle")
       label.setAttribute("class","edge-label")
       label.textContent=(
-        (e.source_if||"") + " ↔ " + (e.target_if||"")
+        e.source + ":" + (e.source_if||"unassigned") +
+        " ↔ " +
+        e.target + ":" + (e.target_if||"unassigned")
       )
       svg.appendChild(label)
     }
 
-    ;[a,b].forEach(n=>{
-      const c=document.createElementNS("http://www.w3.org/2000/svg","circle")
-      c.setAttribute("cx",n.position.x)
-      c.setAttribute("cy",n.position.y)
-      c.setAttribute("r",5)
-      c.setAttribute("class","edge-dot")
-      svg.appendChild(c)
-    })
+    if(edgeIndex===0){
+      ;[a,b].forEach(n=>{
+        const c=document.createElementNS("http://www.w3.org/2000/svg","circle")
+        c.setAttribute("cx",n.position.x)
+        c.setAttribute("cy",n.position.y)
+        c.setAttribute("r",5)
+        c.setAttribute("class","edge-dot "+statusClass)
+        svg.appendChild(c)
+      })
+    }
   })
   canvas.appendChild(svg)
 
@@ -200,7 +276,13 @@ function render(){
       <div class="label">${n.label}</div>
       <div class="if-list">
         ${(n.interfaces||[]).map(i =>
-          `<div class="if-label ${i.connected ? "connected" : ""}">${i.name}: ${i.ip}</div>`
+          `<div class="if-label ${
+            String(i.status||"up").toLowerCase()==="administratively down"
+              ? "admin-down"
+              : String(i.status||"up").toLowerCase()==="down"
+                ? "down"
+                : i.connected ? "connected" : ""
+          }" title="${i.name} | IP ${i.ip} | ${i.mode||"unknown"} | ${i.vlan||"unassigned"} | ${i.status||"up"} | peer ${i.peer||"unassigned"}">${i.name}: ${i.ip} · ${i.peer||"unassigned"}</div>`
         ).join("")}
       </div>
       <div class="handle" title="Select this device for connection"></div>
@@ -253,7 +335,7 @@ function render(){
 
     m.style.top=Math.min(
       menu.y,
-      canvas.clientHeight-210
+      canvas.clientHeight-250
     )+"px"
 
     m.onclick=e=>e.stopPropagation()
@@ -266,6 +348,7 @@ function render(){
       ["⚙ Configure","configure"],
       ["⌨ Open Console","open_console"],
       ["🔌 Interfaces","interfaces"],
+      ["⛓ Disconnect Link","disconnect_link"],
       ["＋ Add Interface","add_interface"],
       ["🗑 Delete Device","delete_device"]
     ]
