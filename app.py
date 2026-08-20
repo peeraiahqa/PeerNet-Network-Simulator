@@ -92,6 +92,7 @@ from dns_engine import (
     resolve_name,
     show_records as show_dns_records,
 )
+from simulator_ai import extract_commands, generate_command_guidance
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -671,6 +672,60 @@ body {
     font-weight: 800 !important;
 }
 
+/* Far-right AI tab: this is the only tab row containing eight buttons. */
+div[role="tablist"]:has(button:nth-of-type(8)),
+[data-baseweb="tab-list"]:has(button:nth-of-type(8)) {
+    display:flex !important;
+    width:100% !important;
+}
+
+div[role="tablist"]:has(button:nth-of-type(8)) button:nth-of-type(8),
+[data-baseweb="tab-list"]:has(button:nth-of-type(8)) button:nth-of-type(8) {
+    margin-left:auto !important;
+    padding:.45rem .9rem !important;
+    border:1px solid rgba(124,58,237,.38) !important;
+    border-radius:999px !important;
+    background:linear-gradient(135deg,#7c3aed 0%,#2563eb 55%,#06b6d4 100%) !important;
+    color:#ffffff !important;
+    font-weight:850 !important;
+    box-shadow:0 6px 16px rgba(79,70,229,.28) !important;
+}
+
+div[role="tablist"]:has(button:nth-of-type(8)) button:nth-of-type(8) p,
+[data-baseweb="tab-list"]:has(button:nth-of-type(8)) button:nth-of-type(8) p {
+    color:#ffffff !important;
+    font-weight:850 !important;
+}
+
+div[role="tablist"]:has(button:nth-of-type(8)) button:nth-of-type(8):hover,
+[data-baseweb="tab-list"]:has(button:nth-of-type(8)) button:nth-of-type(8):hover {
+    filter:brightness(1.08);
+    transform:translateY(-1px);
+}
+
+/* Compact, colorful AI Assistant actions. */
+[class*="st-key-generate_ai_commands"] button {
+    width:auto !important;
+    min-width:170px !important;
+    padding:.42rem .9rem !important;
+    border:0 !important;
+    border-radius:9px !important;
+    background:linear-gradient(135deg,#2563eb,#7c3aed) !important;
+    color:#ffffff !important;
+    box-shadow:0 4px 12px rgba(79,70,229,.22) !important;
+}
+
+[class*="st-key-clear_ai_answer"] button {
+    width:auto !important;
+    min-width:82px !important;
+    padding:.42rem .8rem !important;
+    border:1px solid #f59e0b !important;
+    border-radius:9px !important;
+    background:linear-gradient(135deg,#fff7ed,#fef3c7) !important;
+    color:#9a3412 !important;
+    font-weight:800 !important;
+}
+
 [class*="st-key-run_ping"] button {
     background: linear-gradient(135deg,#2563eb,#3b82f6) !important;
     color:#ffffff !important;
@@ -829,6 +884,9 @@ def init_state() -> None:
         "connect_source": None,
         "connect_target": None,
         "connector_type": "Ethernet / Copper",
+        "ai_answer": "",
+        "ai_commands": [],
+        "ai_request": "",
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -4871,6 +4929,7 @@ with right_col:
     packet_tab,
     wireshark_tab,
     events_tab,
+    ai_tab,
 ) = st.tabs(
     [
         "Console",
@@ -4880,7 +4939,64 @@ with right_col:
         "Packet Analysis",
         "Wireshark",
         "Events",
-    ]
+        "✨ AI Assistant",
+    ],
+    key="main_tools_tab",
+    on_change="rerun",
+)
+
+# Native Streamlit tab markup can vary by release. Apply the AI tab styling
+# directly after render so it remains at the far-right edge across versions.
+st.iframe(
+    """
+    <script>
+    (() => {
+      const styleAI = () => {
+        const doc = window.parent.document;
+        const rows = Array.from(doc.querySelectorAll('[role="tablist"]'));
+        const row = rows.find(item =>
+          item.querySelectorAll('[role="tab"]').length === 8
+        );
+        if (!row) return false;
+
+        const tabs = row.querySelectorAll('[role="tab"]');
+        const ai = tabs[tabs.length - 1];
+        row.style.setProperty('display', 'flex', 'important');
+        row.style.setProperty('width', '100%', 'important');
+        ai.style.setProperty('margin-left', 'auto', 'important');
+        ai.style.setProperty('padding', '.45rem .9rem', 'important');
+        ai.style.setProperty('border', '1px solid rgba(124,58,237,.38)', 'important');
+        ai.style.setProperty('border-radius', '999px', 'important');
+        ai.style.setProperty(
+          'background',
+          'linear-gradient(135deg,#7c3aed 0%,#2563eb 55%,#06b6d4 100%)',
+          'important'
+        );
+        ai.style.setProperty('color', '#ffffff', 'important');
+        ai.style.setProperty('font-weight', '850', 'important');
+        ai.style.setProperty(
+          'box-shadow',
+          '0 6px 16px rgba(79,70,229,.28)',
+          'important'
+        );
+        ai.querySelectorAll('*').forEach(child => {
+          child.style.setProperty('color', '#ffffff', 'important');
+          child.style.setProperty('font-weight', '850', 'important');
+        });
+        return true;
+      };
+
+      let attempts = 0;
+      const timer = window.setInterval(() => {
+        attempts += 1;
+        if (styleAI() || attempts >= 40) window.clearInterval(timer);
+      }, 100);
+    })();
+    </script>
+    """,
+    height=1,
+    width="content",
+    tab_index=-1,
 )
 
 selected_device = st.session_state.selected_device
@@ -5018,6 +5134,84 @@ with console_tab:
         st.info(
             "Add a device first. The interactive console will appear here."
         )
+
+with ai_tab:
+    st.subheader("PeerNet AI Command Assistant")
+    st.caption(
+        "Ask for simulator-compatible configuration or troubleshooting "
+        "commands. AI suggestions are never executed automatically."
+    )
+
+    if st.session_state.devices:
+        ai_selected = st.session_state.selected_device
+        if ai_selected not in st.session_state.devices:
+            ai_selected = next(iter(st.session_state.devices))
+
+        if st.session_state.ai_answer:
+            st.markdown(st.session_state.ai_answer)
+
+        if st.session_state.ai_commands:
+            st.markdown("#### Copy commands to Console")
+            st.code(
+                "\n".join(st.session_state.ai_commands),
+                language="text",
+            )
+
+        if st.session_state.ai_answer:
+            st.markdown("---")
+            st.markdown("#### Ask a follow-up question")
+
+        ai_request = st.text_area(
+            "What do you want to configure or troubleshoot?",
+            key="ai_request",
+            placeholder=(
+                "Example: Configure OSPF area 0 on this router and provide "
+                "verification commands"
+            ),
+            height=110,
+        )
+
+        generate_col, clear_ai_col, ai_action_space = st.columns(
+            [1.25, .55, 6.2]
+        )
+        with generate_col:
+            generate_ai = st.button(
+                "Generate Commands",
+                type="primary",
+                width="content",
+                key="generate_ai_commands",
+            )
+        with clear_ai_col:
+            if st.button(
+                "Clear",
+                width="content",
+                key="clear_ai_answer",
+            ):
+                st.session_state.ai_answer = ""
+                st.session_state.ai_commands = []
+                st.rerun()
+
+        if generate_ai:
+            if not ai_request.strip():
+                st.warning("Enter a configuration or troubleshooting request.")
+            else:
+                try:
+                    with st.spinner("PeerNet AI is preparing commands..."):
+                        answer = generate_command_guidance(
+                            ai_request,
+                            st.session_state.devices,
+                            st.session_state.links,
+                            ai_selected,
+                            previous_answer=st.session_state.ai_answer,
+                        )
+                    st.session_state.ai_answer = answer
+                    st.session_state.ai_commands = extract_commands(answer)
+                    st.rerun()
+                except Exception as error:
+                    st.error(f"Unable to generate commands: {error}")
+
+    else:
+        st.info("Add a device first so PeerNet AI can use its topology context.")
 
 with ping_tab:
     if st.session_state.devices:
