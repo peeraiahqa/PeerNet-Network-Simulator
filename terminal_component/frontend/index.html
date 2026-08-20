@@ -190,10 +190,68 @@ function render(){
     cmd.setSelectionRange(len,len)
   }
 
-  screen.onclick=focusInput
-  terminal.onclick=focusInput
+  // Keep click-to-focus for empty console areas, but do not steal focus or
+  // clear a text selection when the user is copying console output.
+  screen.addEventListener("click",event=>{
+    const selectedText=window.getSelection().toString()
+
+    if(event.target!==cmd && !selectedText){
+      focusInput()
+    }
+  })
 
   cmd.addEventListener("input",()=>autoSize(cmd))
+
+  // Handle pasted text explicitly because this terminal runs inside a
+  // Streamlit component iframe. This supports Ctrl+V and right-click Paste.
+  cmd.addEventListener("paste",event=>{
+    event.preventDefault()
+
+    const pastedText=event.clipboardData?.getData("text/plain")||""
+
+    // A copied configuration block behaves like a real network console:
+    // newline-separated commands are submitted together and app.py executes
+    // them sequentially while preserving the device's CLI mode.
+    if(/\r|\n/.test(pastedText)){
+      const command=pastedText
+        .replace(/\r\n/g,"\n")
+        .replace(/\r/g,"\n")
+        .split("\n")
+        .map(line=>line.trim())
+        .filter(Boolean)
+        .join("\n")
+
+      if(command){
+        Streamlit.setValue({
+          id:Date.now()+"-"+Math.random(),
+          action:"command",
+          command,
+          device_name:args.device_name
+        })
+      }
+      cmd.value=""
+      autoSize(cmd)
+      return
+    }
+
+    const start=cmd.selectionStart
+    const end=cmd.selectionEnd
+
+    cmd.setRangeText(pastedText,start,end,"end")
+    cmd.dispatchEvent(new Event("input",{bubbles:true}))
+    cmd.focus()
+  })
+
+  // Preserve copying from the console history. Copying selected text inside
+  // the command textarea continues to use the browser's normal behavior.
+  terminal.addEventListener("copy",event=>{
+    const selectedText=window.getSelection().toString()
+
+    if(selectedText){
+      event.clipboardData.setData("text/plain",selectedText)
+      event.preventDefault()
+    }
+  })
 
   cmd.addEventListener("keydown",event=>{
     if(event.key==="Tab"){
