@@ -3944,7 +3944,7 @@ def configure_dialog(name: str) -> None:
         )
         submitted = st.form_submit_button(
             "Enter",
-            use_container_width=True,
+            width="stretch",
             type="primary",
         )
 
@@ -4006,7 +4006,7 @@ def pc_config_dialog(name: str) -> None:
             apply_clicked = st.form_submit_button(
                 "Apply",
                 type="primary",
-                use_container_width=True,
+                width="stretch",
             )
 
         if apply_clicked:
@@ -4057,7 +4057,7 @@ def add_interface_dialog(name: str) -> None:
     if st.button(
         "Add Interface",
         type="primary",
-        use_container_width=True,
+        width="stretch",
         key=f"ctx_add_port_{name}",
     ):
         ok, message = add_device_port(
@@ -4144,7 +4144,7 @@ def disconnect_link_dialog(name: str) -> None:
         if st.button(
             "Disconnect selected link",
             type="primary",
-            use_container_width=True,
+            width="stretch",
             disabled=not confirmed,
             key=f"dialog_disconnect_btn_{name}",
         ):
@@ -4209,7 +4209,7 @@ def auth_page() -> None:
                     submitted = st.form_submit_button(
                         "Login →",
                         type="primary",
-                        use_container_width=True,
+                        width="stretch",
                     )
 
                 if submitted:
@@ -4238,7 +4238,7 @@ def auth_page() -> None:
                     )
                     submitted = st.form_submit_button(
                         "Create account",
-                        use_container_width=True,
+                        width="stretch",
                     )
 
                 if submitted:
@@ -4259,7 +4259,7 @@ def auth_page() -> None:
 
                 if st.button(
                     "Send reset link",
-                    use_container_width=True,
+                    width="stretch",
                 ):
                     try:
                         send_password_reset(email)
@@ -4278,7 +4278,7 @@ def auth_page() -> None:
         # Existing side image is intentionally preserved.
         st.image(
             LOGIN_ART,
-            use_container_width=True,
+            width="stretch",
         )
 
 
@@ -4362,7 +4362,7 @@ with st.sidebar:
 
     if st.button(
         "＋ Create Project",
-        use_container_width=True,
+        width="stretch",
         key="project_create",
     ):
         clear_topology()
@@ -4374,7 +4374,7 @@ with st.sidebar:
 
     if st.button(
         "💾 Save Project",
-        use_container_width=True,
+        width="stretch",
         key="project_save",
     ):
         try:
@@ -4402,7 +4402,7 @@ with st.sidebar:
     with open_col:
         if st.button(
             "📂 Open",
-            use_container_width=True,
+            width="stretch",
             disabled=selected_project not in project_map,
             key="project_open",
         ):
@@ -4422,7 +4422,7 @@ with st.sidebar:
     with delete_col:
         if st.button(
             "🗑 Delete",
-            use_container_width=True,
+            width="stretch",
             disabled=selected_project not in project_map,
             key="project_delete",
         ):
@@ -4453,7 +4453,7 @@ with st.sidebar:
 
     if st.button(
         f"＋ Add {device_type}",
-        use_container_width=True,
+        width="stretch",
         key="device_add",
     ):
         add_device(device_type)
@@ -4464,7 +4464,7 @@ with st.sidebar:
     with demo_col:
         if st.button(
             "Demo",
-            use_container_width=True,
+            width="stretch",
             key="load_demo",
         ):
             load_demo()
@@ -4473,7 +4473,7 @@ with st.sidebar:
     with reset_col:
         if st.button(
             "Reset",
-            use_container_width=True,
+            width="stretch",
             key="reset_topology",
         ):
             clear_topology()
@@ -4482,7 +4482,7 @@ with st.sidebar:
     with st.container(key="logout_btn"):
         if st.button(
             "↪ Logout",
-            use_container_width=True,
+            width="stretch",
         ):
             try:
                 sign_out()
@@ -4535,13 +4535,13 @@ with toolbar_col:
     with tool_cols[0]:
         st.button(
             "↖ Select",
-            use_container_width=True,
+            width="stretch",
             key="tool_select",
         )
     with tool_cols[1]:
         if st.button(
             "🔗 Connect",
-            use_container_width=True,
+            width="stretch",
             key="tool_connect",
         ):
             if st.session_state.selected_device:
@@ -4552,13 +4552,13 @@ with toolbar_col:
     with tool_cols[2]:
         st.button(
             "✥ Move",
-            use_container_width=True,
+            width="stretch",
             key="tool_move",
         )
     with tool_cols[3]:
         if st.button(
             "🗑 Delete",
-            use_container_width=True,
+            width="stretch",
             key="tool_delete",
         ):
             selected = st.session_state.selected_device
@@ -4570,7 +4570,7 @@ with toolbar_col:
     with tool_cols[4]:
         st.button(
             "⛶ Full",
-            use_container_width=True,
+            width="stretch",
             key="tool_fullscreen",
             help="Use your browser full-screen mode for the largest workspace.",
         )
@@ -4700,7 +4700,7 @@ with right_col:
 
                 if st.button(
                     "🔌 Connect Interfaces",
-                    use_container_width=True,
+                    width="stretch",
                     type="primary",
                     key="easy_connect_btn",
                 ):
@@ -4758,7 +4758,7 @@ with right_col:
             if disconnect_item.get("forced_down"):
                 if st.button(
                     "🛠 Restore Cable",
-                    use_container_width=True,
+                    width="stretch",
                     key="restore_selected_link",
                 ):
                     disconnect_item["forced_down"] = False
@@ -4767,7 +4767,7 @@ with right_col:
             else:
                 if st.button(
                     "⚠ Simulate Cable Failure",
-                    use_container_width=True,
+                    width="stretch",
                     key="fail_selected_link",
                 ):
                     disconnect_item["forced_down"] = True
@@ -4779,7 +4779,7 @@ with right_col:
             )
             if st.button(
                 "⛓ Disconnect Link",
-                use_container_width=True,
+                width="stretch",
                 type="primary",
                 disabled=not confirm_disconnect,
                 key="easy_disconnect_btn",
@@ -4795,7 +4795,7 @@ with right_col:
         for item in DEVICE_GROUPS["Network Devices"]:
             if st.button(
                 item,
-                use_container_width=True,
+                width="stretch",
                 key=f"right_add_{item}",
             ):
                 add_device(item)
@@ -4805,7 +4805,7 @@ with right_col:
         for item in DEVICE_GROUPS["End Users"]:
             if st.button(
                 item,
-                use_container_width=True,
+                width="stretch",
                 key=f"right_add_{item}",
             ):
                 add_device(item)
@@ -4834,7 +4834,7 @@ with right_col:
 
             if st.button(
                 "＋ Add Port",
-                use_container_width=True,
+                width="stretch",
                 key="add_port_button",
             ):
                 ok, message = add_device_port(
@@ -4964,7 +4964,7 @@ with console_tab:
         with quick1:
             if st.button(
                 "show ip int brief",
-                use_container_width=True,
+                width="stretch",
                 key="quick_interfaces",
             ):
                 execute_cli(
@@ -4976,7 +4976,7 @@ with console_tab:
         with quick2:
             if st.button(
                 "show ip route",
-                use_container_width=True,
+                width="stretch",
                 key="quick_routes",
             ):
                 execute_cli(
@@ -4988,7 +4988,7 @@ with console_tab:
         with quick3:
             if st.button(
                 "show run",
-                use_container_width=True,
+                width="stretch",
                 key="quick_run",
             ):
                 execute_cli(
@@ -5000,7 +5000,7 @@ with console_tab:
         with quick4:
             if st.button(
                 "Clear Console",
-                use_container_width=True,
+                width="stretch",
                 key="quick_clear",
             ):
                 st.session_state.cli_history[selected_device] = [
@@ -5056,12 +5056,12 @@ with ping_tab:
             "Run Ping",
             key="run_ping",
             type="primary",
-            use_container_width=True,
+            width="stretch",
         )
         if ping_stop_col.button(
             "⏹ Stop Ping",
             key="stop_ping_animation",
-            use_container_width=True,
+            width="stretch",
         ):
             st.session_state.packet_animation = {}
             add_event("Ping animation stopped by user.")
@@ -5132,7 +5132,7 @@ with ping_tab:
                 if st.button(
                     "Clear Ping Output",
                     key="clear_ping_output",
-                    use_container_width=True,
+                    width="stretch",
                 ):
                     st.session_state.ping_output = ""
                     st.rerun()
@@ -5181,12 +5181,12 @@ with trace_tab:
             "Run Traceroute",
             key="run_trace",
             type="primary",
-            use_container_width=True,
+            width="stretch",
         )
         if trace_stop_col.button(
             "⏹ Stop Traceroute",
             key="stop_trace_animation",
-            use_container_width=True,
+            width="stretch",
         ):
             st.session_state.packet_animation = {}
             add_event("Traceroute animation stopped by user.")
@@ -5258,7 +5258,7 @@ with trace_tab:
                 if st.button(
                     "Clear Traceroute Output",
                     key="clear_trace_output",
-                    use_container_width=True,
+                    width="stretch",
                 ):
                     st.session_state.traceroute_output = ""
                     st.rerun()
@@ -5302,7 +5302,7 @@ with packet_tab:
         if st.button(
             "Clear Packet Analysis",
             key="clear_packet_analysis",
-            use_container_width=True,
+            width="stretch",
         ):
             st.session_state.packet_analysis_output = []
             st.rerun()
@@ -5347,7 +5347,7 @@ with wireshark_tab:
         if st.button(
             "Clear Capture",
             key="clear_capture",
-            use_container_width=True,
+            width="stretch",
         ):
             st.session_state.packet_records = []
             st.session_state.last_capture_path = ""
@@ -5385,14 +5385,14 @@ with wireshark_tab:
                 data=capture_path.read_bytes(),
                 file_name="peernet_capture.pcap",
                 mime="application/vnd.tcpdump.pcap",
-                use_container_width=True,
+                width="stretch",
                 key="download_capture",
             )
 
             if st.button(
                 "Open in Wireshark (Local)",
                 type="primary",
-                use_container_width=True,
+                width="stretch",
                 key="open_capture_wireshark",
             ):
                 ok, message = launch_wireshark(capture_path)
@@ -5420,7 +5420,7 @@ with events_tab:
         if st.button(
             "Clear Events",
             key="clear_events",
-            use_container_width=True,
+            width="stretch",
         ):
             st.session_state.events_log = []
             st.rerun()
