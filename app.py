@@ -4353,7 +4353,10 @@ with st.sidebar:
 
     project_name = st.text_input(
         "Project name",
-        value=st.session_state.current_project_name,
+        value=st.session_state.get(
+            "current_project_name",
+            "Untitled topology",
+        ),
         key="project_name",
     )
 
