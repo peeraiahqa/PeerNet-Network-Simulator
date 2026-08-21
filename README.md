@@ -2,6 +2,20 @@
 
 This build replaces decorative/fake controls with real Streamlit interactions.
 
+## Application Preview
+
+### Login and Account Access
+
+![PeerNet Network Simulator login page](docs/images/simulator-login.png)
+
+### Interactive Network Simulator Dashboard
+
+![PeerNet Network Simulator dashboard](docs/images/simulator-dashboard.png)
+
+Explore the live application:
+
+[Launch PeerNet Network Simulator](https://simulator.peernetsolutions.in)
+
 ## Fixed
 
 - Removed the oversized empty left-panel space
