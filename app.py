@@ -2192,6 +2192,23 @@ PC_DEVICE_TYPES = {
 
 def primary_pc_interface(device: Device) -> Optional[Interface]:
     preferred = ("eth0", "Ethernet0", "Gi0/0", "wlan0")
+
+    # A laptop can expose both eth0 and wlan0.  Prefer the adapter that is
+    # physically connected so DHCP and host traffic are bound to the cable
+    # (or wireless link) the user actually placed in the topology.
+    for name in preferred:
+        interface = device.interfaces.get(name)
+        if interface and interface.connected_to and interface.status not in {
+            "down", "administratively down", "disabled"
+        }:
+            return interface
+
+    for interface in device.interfaces.values():
+        if interface.connected_to and interface.status not in {
+            "down", "administratively down", "disabled"
+        }:
+            return interface
+
     for name in preferred:
         if name in device.interfaces:
             return device.interfaces[name]
@@ -2409,6 +2426,17 @@ def execute_pc_cli(name: str, command: str) -> bool:
         if interface is None:
             append_cli(name, "DHCP failed: this device has no usable interface.")
             return True
+
+        # Migrate a DHCP lease that an older version may have placed on a
+        # disconnected adapter (for example LAP1:eth0 while wlan0 is linked).
+        # Static addresses are preserved because only recorded DHCP leases are
+        # removed here.
+        for other_name, other_interface in device.interfaces.items():
+            if other_name == interface.name:
+                continue
+            if release_lease(st.session_state.devices, name, other_name):
+                other_interface.ip_address = ""
+
         ok, message, lease = allocate_lease(
             st.session_state.devices, st.session_state.links, name, interface.name
         )
@@ -5327,6 +5355,11 @@ with console_tab:
             st.session_state.cli_history[selected_device][-80:]
         )
 
+        focus_terminal = (
+            st.session_state.pop("terminal_focus_device", None)
+            == selected_device
+        )
+
         terminal_event = inline_terminal(
             history=terminal_history,
             prompt=prompt(selected_device),
@@ -5335,6 +5368,7 @@ with console_tab:
                 selected_device, []
             ),
             prefill=st.session_state.get("terminal_prefill", ""),
+            focus_input=focus_terminal,
             height=390,
             key=f"inline_terminal_{selected_device}",
         )
@@ -5363,6 +5397,7 @@ with console_tab:
                     selected_device,
                     submitted_command,
                 )
+                st.session_state.terminal_focus_device = selected_device
                 st.rerun()
 
             elif terminal_event.get("action") == "tab":
@@ -5392,6 +5427,7 @@ with console_tab:
                     )
                     st.session_state.terminal_prefill = partial
 
+                st.session_state.terminal_focus_device = selected_device
                 st.rerun()
 
         quick1, quick2, quick3, quick4 = st.columns(4)

@@ -15,6 +15,7 @@ def inline_terminal(
     device_name,
     command_history=None,
     prefill="",
+    focus_input=False,
     height=360,
     key="peernet_terminal",
 ):
@@ -24,6 +25,7 @@ def inline_terminal(
         device_name=device_name,
         command_history=command_history or [],
         prefill=prefill,
+        focus_input=focus_input,
         height=height,
         key=key,
         default=None,

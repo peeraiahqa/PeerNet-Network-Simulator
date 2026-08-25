@@ -137,6 +137,7 @@ let args = {
   device_name:"",
   command_history:[],
   prefill:"",
+  focus_input:false,
   height:360
 }
 
@@ -310,6 +311,9 @@ function render(){
 
   setTimeout(()=>{
     screen.scrollTop=screen.scrollHeight
+    if(args.focus_input){
+      focusInput()
+    }
   },30)
 
   Streamlit.setHeight(args.height||360)
