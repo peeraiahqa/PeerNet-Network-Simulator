@@ -56,7 +56,7 @@ from routing_cli import (
     routing_running_config,
     show_routing_summary,
 )
-from routing_engine import evaluate_route
+from routing_engine import evaluate_bidirectional_route, evaluate_route
 from network_validation import (
     audit_topology,
     validate_gateway,
@@ -864,8 +864,11 @@ def init_state() -> None:
         "cli_route_map_contexts": {},
         "cli_dhcp_contexts": {},
         "cli_history": {},
+        "cli_command_history": {},
+        "deleted_device_undo": [],
         "booted": set(),
         "selected_device": None,
+        "topology_selected_device": None,
         "dialog_mode": None,
         "dialog_device": None,
         "last_event": None,
@@ -922,7 +925,11 @@ def add_device(device_type: str, position: Optional[dict] = None) -> str:
 
     st.session_state.cli_modes[name] = "user"
     st.session_state.cli_history[name] = []
-    st.session_state.selected_device = name
+    st.session_state.cli_command_history[name] = []
+    # Keep the current selection while the user is building a topology.
+    # Selecting every newly added device made the console steal the viewport.
+    if st.session_state.selected_device not in st.session_state.devices:
+        st.session_state.selected_device = name
     return name
 
 
@@ -1921,6 +1928,8 @@ def rename_device(old_name: str, new_name: str) -> str:
 
     if old_name in st.session_state.cli_history:
         st.session_state.cli_history[new_name] = st.session_state.cli_history.pop(old_name)
+    if old_name in st.session_state.cli_command_history:
+        st.session_state.cli_command_history[new_name] = st.session_state.cli_command_history.pop(old_name)
 
     if old_name in st.session_state.booted:
         st.session_state.booted.remove(old_name)
@@ -2107,7 +2116,7 @@ def pc_ping_result(
     source_ip: str = "",
 ) -> str:
     try:
-        destination = ipaddress.ip_address(destination_ip)
+        destination_ip = str(ipaddress.ip_address(destination_ip))
     except ValueError:
         return f"Ping request could not find host {destination_ip}."
 
@@ -2130,50 +2139,16 @@ def pc_ping_result(
     if not source_if or not source_if.ip_address:
         return "PING failed: source PC has no IP address."
 
-    # Logical reachability check:
-    # 1) destination belongs to any configured interface in topology
-    # 2) same subnet, or PC has a default gateway configured
-    destination_owner = None
-    destination_interface = None
-
-    for device_name, device in st.session_state.devices.items():
-        for interface in device.interfaces.values():
-            if not interface.ip_address:
-                continue
-            try:
-                configured_ip = ipaddress.ip_interface(
-                    interface.ip_address
-                ).ip
-            except ValueError:
-                continue
-
-            if configured_ip == destination:
-                destination_owner = device_name
-                destination_interface = interface
-                break
-
-        if destination_owner:
-            break
-
-    if not destination_owner:
-        return (
-            f"Pinging {destination_ip} with 32 bytes of data:\n"
-            "Request timed out.\n"
-            "Request timed out.\n\n"
-            "Packets: Sent = 2, Received = 0, Lost = 2 (100% loss)"
-        )
-
-    try:
-        source_network = ipaddress.ip_interface(
-            source_if.ip_address
-        ).network
-        same_subnet = destination in source_network
-    except ValueError:
-        same_subnet = False
-
-    reachable = same_subnet or bool(source_device.default_gateway)
-
-    if reachable:
+    configured_source_ip = str(ipaddress.ip_interface(source_if.ip_address).ip)
+    route_result = evaluate_bidirectional_route(
+        source_name,
+        configured_source_ip,
+        destination_ip,
+        st.session_state.devices,
+        st.session_state.links,
+    )
+    if route_result.reachable:
+        start_packet_animation(route_result.path, "ICMP")
         return (
             f"Pinging {destination_ip} with 32 bytes of data:\n"
             f"Reply from {destination_ip}: bytes=32 time<1ms TTL=128\n"
@@ -2181,10 +2156,15 @@ def pc_ping_result(
             "Packets: Sent = 2, Received = 2, Lost = 0 (0% loss)"
         )
 
+    st.session_state.packet_animation = {}
+    details = "\n".join(route_result.decisions)
     return (
         f"Pinging {destination_ip} with 32 bytes of data:\n"
+        "Destination host unreachable.\n"
         "Destination host unreachable.\n\n"
-        "Packets: Sent = 1, Received = 0, Lost = 1 (100% loss)"
+        "Packets: Sent = 2, Received = 0, Lost = 2 (100% loss)\n"
+        f"Reason: {route_result.reason}"
+        + (f"\n{details}" if details else "")
     )
 
 
@@ -2354,12 +2334,28 @@ def execute_pc_cli(name: str, command: str) -> bool:
         if not ok:
             append_cli(name, f"Unable to resolve {query}: {detail}")
             return True
-        append_cli(
+        source_interface = primary_pc_interface(device)
+        if not source_interface or not source_interface.ip_address:
+            append_cli(name, "Trace failed: source PC has no IP address.")
+            return True
+        source_ip = str(ipaddress.ip_interface(source_interface.ip_address).ip)
+        route_result = evaluate_bidirectional_route(
             name,
-            f"Tracing route to {destination}\n"
-            f"  1    <1 ms    {device.default_gateway or destination}\n"
-            f"Trace complete.",
+            source_ip,
+            destination,
+            st.session_state.devices,
+            st.session_state.links,
         )
+        lines = [f"Tracing route to {destination}"]
+        for hop_number, hop in enumerate(route_result.path[1:], start=1):
+            lines.append(f"  {hop_number:<2}   <1 ms    {hop}")
+        if route_result.reachable:
+            start_packet_animation(route_result.path, "ICMP Traceroute")
+            lines.append("Trace complete.")
+        else:
+            st.session_state.packet_animation = {}
+            lines.extend(["  *     Request timed out.", f"Trace failed: {route_result.reason}"])
+        append_cli(name, "\n".join(lines))
         return True
 
     if lowered == "arp -a":
@@ -2453,7 +2449,7 @@ def console_ping_result(
         return (
             f"% Unable to source ping: {source_name} has no configured IP address."
         )
-    route_result = evaluate_route(
+    route_result = evaluate_bidirectional_route(
         source_name,
         source_ip,
         destination_ip,
@@ -2541,7 +2537,7 @@ def console_traceroute_result(
             f"% Unable to source traceroute: {source_name} has no configured IP address."
         )
 
-    route_result = evaluate_route(
+    route_result = evaluate_bidirectional_route(
         source_name,
         source_ip,
         destination_ip,
@@ -3684,16 +3680,42 @@ def restore_topology(payload: dict) -> None:
     st.session_state.cli_route_map_contexts = {}
     st.session_state.cli_dhcp_contexts = {}
     st.session_state.cli_history = {name: [] for name in devices}
+    st.session_state.cli_command_history = {name: [] for name in devices}
+    st.session_state.deleted_device_undo = []
     st.session_state.booted = set()
     st.session_state.selected_device = (
         next(iter(devices)) if devices else None
     )
+    st.session_state.topology_selected_device = None
 
 
 
 def delete_device(device_name: str) -> None:
     if device_name not in st.session_state.devices:
         return
+
+    snapshot = {
+        "name": device_name,
+        "device": copy.deepcopy(st.session_state.devices[device_name]),
+        "links": copy.deepcopy([
+            link for link in st.session_state.links
+            if device_name in {link.get("source"), link.get("target")}
+        ]),
+        "position": copy.deepcopy(st.session_state.positions.get(device_name)),
+        "cli_mode": st.session_state.cli_modes.get(device_name, "user"),
+        "cli_interface": st.session_state.cli_interfaces.get(device_name),
+        "cli_interface_range": copy.deepcopy(st.session_state.cli_interface_ranges.get(device_name)),
+        "cli_vlan": st.session_state.cli_vlans.get(device_name),
+        "cli_routing_context": copy.deepcopy(st.session_state.cli_routing_contexts.get(device_name)),
+        "cli_route_map_context": copy.deepcopy(st.session_state.cli_route_map_contexts.get(device_name)),
+        "cli_dhcp_context": copy.deepcopy(st.session_state.cli_dhcp_contexts.get(device_name)),
+        "cli_history": copy.deepcopy(st.session_state.cli_history.get(device_name, [])),
+        "cli_command_history": copy.deepcopy(st.session_state.cli_command_history.get(device_name, [])),
+        "booted": device_name in st.session_state.booted,
+    }
+    undo_stack = st.session_state.deleted_device_undo
+    undo_stack.append(snapshot)
+    del undo_stack[:-20]
 
     # Clear peer interface references first.
     for device in st.session_state.devices.values():
@@ -3725,6 +3747,7 @@ def delete_device(device_name: str) -> None:
     st.session_state.cli_route_map_contexts.pop(device_name, None)
     st.session_state.cli_dhcp_contexts.pop(device_name, None)
     st.session_state.cli_history.pop(device_name, None)
+    st.session_state.cli_command_history.pop(device_name, None)
 
     if device_name in st.session_state.booted:
         st.session_state.booted.remove(device_name)
@@ -3733,9 +3756,59 @@ def delete_device(device_name: str) -> None:
         st.session_state.selected_device = (
             next(iter(st.session_state.devices), None)
         )
+    if st.session_state.topology_selected_device == device_name:
+        st.session_state.topology_selected_device = None
 
     st.session_state.dialog_mode = None
     st.session_state.dialog_device = None
+
+
+def undo_delete_device() -> bool:
+    """Restore the most recently deleted device and its surviving links."""
+    stack = st.session_state.deleted_device_undo
+    if not stack:
+        return False
+    snapshot = stack.pop()
+    name = snapshot["name"]
+    if name in st.session_state.devices:
+        return False
+    st.session_state.devices[name] = snapshot["device"]
+    if snapshot.get("position"):
+        st.session_state.positions[name] = snapshot["position"]
+    st.session_state.cli_modes[name] = snapshot["cli_mode"]
+    state_items = (
+        ("cli_interfaces", "cli_interface"),
+        ("cli_interface_ranges", "cli_interface_range"),
+        ("cli_vlans", "cli_vlan"),
+        ("cli_routing_contexts", "cli_routing_context"),
+        ("cli_route_map_contexts", "cli_route_map_context"),
+        ("cli_dhcp_contexts", "cli_dhcp_context"),
+    )
+    for state_name, snapshot_name in state_items:
+        value = snapshot.get(snapshot_name)
+        if value is not None:
+            st.session_state[state_name][name] = value
+    st.session_state.cli_history[name] = snapshot["cli_history"]
+    st.session_state.cli_command_history[name] = snapshot["cli_command_history"]
+    if snapshot["booted"]:
+        st.session_state.booted.add(name)
+
+    for link in snapshot["links"]:
+        source, target = link.get("source"), link.get("target")
+        if source not in st.session_state.devices or target not in st.session_state.devices:
+            continue
+        st.session_state.links.append(link)
+        for endpoint, interface_key, peer, peer_key in (
+            (source, "source_if", target, "target_if"),
+            (target, "target_if", source, "source_if"),
+        ):
+            interface_name = link.get(interface_key)
+            if interface_name in st.session_state.devices[endpoint].interfaces:
+                st.session_state.devices[endpoint].interfaces[interface_name].connected_to = (
+                    f"{peer}:{link.get(peer_key, '')}"
+                )
+    st.session_state.selected_device = name
+    return True
 
 def clear_topology() -> None:
     st.session_state.devices = {}
@@ -3749,8 +3822,11 @@ def clear_topology() -> None:
     st.session_state.cli_route_map_contexts = {}
     st.session_state.cli_dhcp_contexts = {}
     st.session_state.cli_history = {}
+    st.session_state.cli_command_history = {}
+    st.session_state.deleted_device_undo = []
     st.session_state.booted = set()
     st.session_state.selected_device = None
+    st.session_state.topology_selected_device = None
 
 
 def load_demo() -> None:
@@ -3916,6 +3992,22 @@ def handle_canvas_event(event: Optional[dict]) -> None:
             event.get("target"),
         )
         st.rerun()
+
+    elif action == "select_device":
+        node_id = event.get("node_id")
+        if node_id in st.session_state.devices:
+            st.session_state.selected_device = node_id
+            st.session_state.topology_selected_device = node_id
+            st.rerun()
+
+    elif action == "clear_selection":
+        if st.session_state.topology_selected_device is not None:
+            st.session_state.topology_selected_device = None
+            st.rerun()
+
+    elif action == "undo_delete":
+        if undo_delete_device():
+            st.rerun()
 
     elif action in {
         "configure",
@@ -4403,14 +4495,8 @@ with st.sidebar:
         for item in projects
     }
 
-    selected_project = st.selectbox(
-        "Select Project",
-        ["＋ New Project"] + list(project_map),
-        key="project_select",
-    )
-
     project_name = st.text_input(
-        "Project name",
+        "Project Name",
         value=st.session_state.get(
             "current_project_name",
             "Untitled topology",
@@ -4419,7 +4505,7 @@ with st.sidebar:
     )
 
     if st.button(
-        "＋ Create Project",
+        "Create Project",
         width="stretch",
         key="project_create",
     ):
@@ -4430,30 +4516,11 @@ with st.sidebar:
         )
         st.rerun()
 
-    if st.button(
-        "💾 Save Project",
-        width="stretch",
-        key="project_save",
-    ):
-        try:
-            if st.session_state.current_project_id:
-                project = update_simulator_project(
-                    st.session_state.current_project_id,
-                    project_name or "Untitled topology",
-                    topology_payload(),
-                )
-            else:
-                project = create_simulator_project(
-                    project_name or "Untitled topology",
-                    topology_payload(),
-                )
-
-            st.session_state.current_project_id = project["id"]
-            st.session_state.current_project_name = project["name"]
-            st.success("Project saved.")
-            st.rerun()
-        except Exception as error:
-            st.error(f"Unable to save project: {error}")
+    selected_project = st.selectbox(
+        "Select Project",
+        ["New Project"] + list(project_map),
+        key="project_select",
+    )
 
     open_col, delete_col = st.columns(2)
 
@@ -4491,6 +4558,31 @@ with st.sidebar:
                 st.rerun()
             except Exception as error:
                 st.error(f"Unable to delete project: {error}")
+
+    if st.button(
+        "💾 Save Project",
+        width="stretch",
+        key="project_save",
+    ):
+        try:
+            if st.session_state.current_project_id:
+                project = update_simulator_project(
+                    st.session_state.current_project_id,
+                    project_name or "Untitled topology",
+                    topology_payload(),
+                )
+            else:
+                project = create_simulator_project(
+                    project_name or "Untitled topology",
+                    topology_payload(),
+                )
+
+            st.session_state.current_project_id = project["id"]
+            st.session_state.current_project_name = project["name"]
+            st.success("Project saved.")
+            st.rerun()
+        except Exception as error:
+            st.error(f"Unable to save project: {error}")
 
     st.markdown(
         '<div class="pn-section-title devices">◉ DEVICES</div>',
@@ -4619,7 +4711,7 @@ with toolbar_col:
             width="stretch",
             key="tool_delete",
         ):
-            selected = st.session_state.selected_device
+            selected = st.session_state.topology_selected_device
 
             if selected in st.session_state.devices:
                 delete_device(selected)
@@ -4644,6 +4736,7 @@ with canvas_col:
     event = topology_canvas(
         node_payload(),
         edge_payload(),
+        selected_device=st.session_state.topology_selected_device,
         height=520,
         key="topology_canvas",
     )
@@ -5026,6 +5119,9 @@ with console_tab:
             history=terminal_history,
             prompt=prompt(selected_device),
             device_name=selected_device,
+            command_history=st.session_state.cli_command_history.setdefault(
+                selected_device, []
+            ),
             prefill=st.session_state.get("terminal_prefill", ""),
             height=390,
             key=f"inline_terminal_{selected_device}",
@@ -5040,9 +5136,20 @@ with console_tab:
             st.session_state.last_terminal_event = terminal_event.get("id")
 
             if terminal_event.get("action") == "command":
+                submitted_command = terminal_event.get("command", "")
+                command_lines = [
+                    line.strip()
+                    for line in submitted_command.replace("\r", "\n").split("\n")
+                    if line.strip()
+                ]
+                command_history = st.session_state.cli_command_history.setdefault(
+                    selected_device, []
+                )
+                command_history.extend(command_lines)
+                del command_history[:-100]
                 execute_cli(
                     selected_device,
-                    terminal_event.get("command", ""),
+                    submitted_command,
                 )
                 st.rerun()
 
@@ -5284,7 +5391,7 @@ with ping_tab:
                     "Please enter a destination IP address."
                 )
             elif source in st.session_state.devices:
-                route_result = evaluate_route(
+                route_result = evaluate_bidirectional_route(
                     source,
                     source_ip,
                     destination.strip(),
@@ -5409,7 +5516,7 @@ with trace_tab:
                     "Please enter a destination IP address."
                 )
             else:
-                route_result = evaluate_route(
+                route_result = evaluate_bidirectional_route(
                     source,
                     source_ip,
                     destination.strip(),
