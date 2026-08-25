@@ -135,6 +135,7 @@ let args = {
   history:"",
   prompt:"",
   device_name:"",
+  command_history:[],
   prefill:"",
   height:360
 }
@@ -183,9 +184,14 @@ function render(){
 
   const screen=terminal.querySelector("#screen")
   const cmd=terminal.querySelector("#cmd")
+  const commandHistory=Array.isArray(args.command_history)
+    ? args.command_history.filter(Boolean)
+    : []
+  let historyIndex=commandHistory.length
+  let draftCommand=cmd.value
 
   const focusInput=()=>{
-    cmd.focus()
+    cmd.focus({preventScroll:true})
     const len=cmd.value.length
     cmd.setSelectionRange(len,len)
   }
@@ -254,6 +260,29 @@ function render(){
   })
 
   cmd.addEventListener("keydown",event=>{
+    if(event.key==="ArrowUp"){
+      if(!commandHistory.length)return
+      event.preventDefault()
+      if(historyIndex===commandHistory.length)draftCommand=cmd.value
+      historyIndex=Math.max(0,historyIndex-1)
+      cmd.value=commandHistory[historyIndex]
+      autoSize(cmd)
+      cmd.setSelectionRange(cmd.value.length,cmd.value.length)
+      return
+    }
+
+    if(event.key==="ArrowDown"){
+      if(!commandHistory.length || historyIndex>=commandHistory.length)return
+      event.preventDefault()
+      historyIndex+=1
+      cmd.value=historyIndex===commandHistory.length
+        ? draftCommand
+        : commandHistory[historyIndex]
+      autoSize(cmd)
+      cmd.setSelectionRange(cmd.value.length,cmd.value.length)
+      return
+    }
+
     if(event.key==="Tab"){
       event.preventDefault()
       Streamlit.setValue({
@@ -281,7 +310,6 @@ function render(){
 
   setTimeout(()=>{
     screen.scrollTop=screen.scrollHeight
-    focusInput()
   },30)
 
   Streamlit.setHeight(args.height||360)

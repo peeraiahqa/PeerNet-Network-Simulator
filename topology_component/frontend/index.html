@@ -36,6 +36,11 @@ svg{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
 }
 .node:active{cursor:grabbing}
 .node:hover{background:rgba(239,246,255,.65)}
+.node.selected{
+  background:linear-gradient(135deg,rgba(219,234,254,.96),rgba(237,233,254,.96));
+  box-shadow:0 0 0 3px #2563eb,0 8px 22px rgba(37,99,235,.28);
+}
+.node.selected .label{color:#1d4ed8}
 
 .node .icon{font-size:46px;line-height:1}
 .node .router-img,
@@ -55,6 +60,7 @@ svg{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
   white-space:nowrap;box-shadow:0 2px 5px rgba(15,23,42,.08)
 }
 .node .if-label.connected{border-color:#86efac;background:#f0fdf4;color:#166534}
+.node .if-label.connecting{border-color:#fbbf24;background:#fffbeb;color:#b45309}
 .node .if-label.down{border-color:#fecaca;background:#fef2f2;color:#b91c1c}
 .node .if-label.admin-down{border-color:#fed7aa;background:#fff7ed;color:#c2410c}
 .handle{
@@ -115,9 +121,12 @@ const Streamlit={
   setValue(v){parent.postMessage({isStreamlitMessage:true,type:"streamlit:setComponentValue",value:v},"*")},
   setHeight(h){parent.postMessage({isStreamlitMessage:true,type:"streamlit:setFrameHeight",height:h},"*")}
 }
-let args={nodes:[],edges:[],
+let args={nodes:[],edges:[],selected_device:null,
   zones:[],height:560}
-let dragId=null, menu=null, connectSource=null
+let dragId=null, dragStart=null, dragMoved=false, suppressNextClick=false
+let menu=null, connectSource=null
+const switchConnectedAt=new Map()
+const switchReadyTimers=new Map()
 
 const icons={
 "Router":"🛰️","Switch":"🔀","Multilayer Switch":"🧩","Cisco IOS Firewall":"🧱",
@@ -260,7 +269,7 @@ function render(){
 
   ;(args.nodes||[]).forEach(n=>{
     const d=document.createElement("div")
-    d.className="node"
+    d.className="node"+(args.selected_device===n.id ? " selected" : "")
     d.dataset.nodeId=n.id
     d.style.left=n.position.x+"px"
     d.style.top=n.position.y+"px"
@@ -275,15 +284,41 @@ function render(){
       }
       <div class="label">${n.label}</div>
       <div class="if-list">
-        ${(n.interfaces||[]).map(i =>
-          `<div class="if-label ${
-            String(i.status||"up").toLowerCase()==="administratively down"
-              ? "admin-down"
-              : String(i.status||"up").toLowerCase()==="down"
-                ? "down"
-                : i.connected ? "connected" : ""
-          }" title="${i.name} | IP ${i.ip} | ${i.mode||"unknown"} | ${i.vlan||"unassigned"} | ${i.status||"up"} | peer ${i.peer||"unassigned"}">${i.name}: ${i.ip} · ${i.peer||"unassigned"}</div>`
-        ).join("")}
+        ${(n.interfaces||[]).map(i => {
+          const status=String(i.status||"up").toLowerCase()
+          const isLayer2Switch=n.device_type==="Switch"
+          const connectionKey=`${n.id}:${i.name}:${i.peer||""}`
+          let connectionClass=i.connected
+            ? (isLayer2Switch || (i.ip && i.ip!=="unassigned")
+                ? "connected"
+                : "connecting")
+            : ""
+
+          if(isLayer2Switch && i.connected && status==="up"){
+            if(!switchConnectedAt.has(connectionKey)){
+              switchConnectedAt.set(connectionKey,Date.now())
+            }
+            const remaining=2000-(Date.now()-switchConnectedAt.get(connectionKey))
+            if(remaining>0){
+              connectionClass="connecting"
+              if(!switchReadyTimers.has(connectionKey)){
+                switchReadyTimers.set(connectionKey,setTimeout(()=>{
+                  switchReadyTimers.delete(connectionKey)
+                  render()
+                },remaining+10))
+              }
+            }
+          }
+
+          const statusClass=status==="administratively down"
+            ? "admin-down"
+            : status==="down" ? "down" : connectionClass
+          const ipDetail=isLayer2Switch ? "IP not required (Layer 2)" : `IP ${i.ip}`
+          const label=isLayer2Switch
+            ? `${i.name}${i.connected && i.peer ? ` · ${i.peer}` : ""}`
+            : `${i.name}: ${i.ip} · ${i.peer||"unassigned"}`
+          return `<div class="if-label ${statusClass}" title="${i.name} | ${ipDetail} | ${i.mode||"unknown"} | ${i.vlan||"unassigned"} | ${i.status||"up"} | peer ${i.peer||"unassigned"}">${label}</div>`
+        }).join("")}
       </div>
       <div class="handle" title="Select this device for connection"></div>
     `
@@ -291,8 +326,20 @@ function render(){
     d.onmousedown=e=>{
       if(e.button!==0 || e.target.classList.contains("handle"))return
       dragId=n.id
+      dragStart={x:e.clientX,y:e.clientY}
+      dragMoved=false
       e.preventDefault()
     }
+
+    d.addEventListener("click",e=>{
+      if(e.target.classList.contains("handle"))return
+      e.stopPropagation()
+      if(suppressNextClick){
+        suppressNextClick=false
+        return
+      }
+      emit("select_device",{node_id:n.id})
+    })
 
     d.addEventListener("contextmenu",e=>{
       e.preventDefault()
@@ -365,13 +412,25 @@ function render(){
 
     canvas.appendChild(m)
   }
-  canvas.onclick=()=>{menu=null;render()}
+  canvas.onclick=()=>{
+    menu=null
+    if(args.selected_device)emit("clear_selection")
+    else render()
+  }
   root.appendChild(canvas)
   Streamlit.setHeight(args.height||560)
 }
 
 document.addEventListener("mousemove",e=>{
   if(!dragId)return
+
+  if(dragStart && Math.hypot(
+    e.clientX-dragStart.x,
+    e.clientY-dragStart.y
+  )>3){
+    dragMoved=true
+  }
+  if(!dragMoved)return
 
   const canvas=document.querySelector(".canvas")
   const n=(args.nodes||[]).find(x=>x.id===dragId)
@@ -405,14 +464,32 @@ document.addEventListener("mouseup",()=>{
 
   const n=(args.nodes||[]).find(x=>x.id===dragId)
 
-  if(n){
+  if(n && dragMoved){
     emit("move",{
       node_id:dragId,
       position:{x:n.position.x,y:n.position.y}
     })
   }
 
+  suppressNextClick=dragMoved
   dragId=null
+  dragStart=null
+  dragMoved=false
+})
+
+document.addEventListener("keydown",event=>{
+  const tag=String(event.target?.tagName||"").toLowerCase()
+  if(event.key==="Escape"){
+    menu=null
+    if(args.selected_device)emit("clear_selection")
+    else render()
+    return
+  }
+  if((event.ctrlKey||event.metaKey) && event.key.toLowerCase()==="z" &&
+     !["input","textarea","select"].includes(tag)){
+    event.preventDefault()
+    emit("undo_delete")
+  }
 })
 
 window.addEventListener("message",e=>{

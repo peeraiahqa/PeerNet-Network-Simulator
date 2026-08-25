@@ -230,6 +230,15 @@ def _host_can_send(device: Any, source_ip: str, destination, devices: dict[str, 
     gateway = getattr(device, "default_gateway", "")
     if not gateway:
         return False, "no default gateway is configured"
+    try:
+        gateway_address = ipaddress.ip_address(gateway)
+    except ValueError:
+        return False, f"default gateway {gateway} is invalid"
+    if gateway_address not in source_interface.network:
+        return False, (
+            f"default gateway {gateway} is outside source subnet "
+            f"{source_interface.network}"
+        )
     gateway_owner = device_for_ip(devices, gateway)
     if not gateway_owner:
         return False, f"default gateway {gateway} is not configured in the topology"
@@ -333,4 +342,63 @@ def evaluate_route(
         reason="Route resolved successfully.",
         decisions=decisions,
         protocol=selected_protocol,
+    )
+
+
+def evaluate_bidirectional_route(
+    source_name: str,
+    source_ip: str,
+    destination_ip: str,
+    devices: dict[str, Any],
+    links: Iterable[dict[str, Any]],
+) -> RouteDecision:
+    """Evaluate forward and return paths for Ping/Traceroute traffic.
+
+    A physical topology path and a one-way route are not sufficient for an
+    ICMP exchange.  The destination must also have a valid route back to the
+    original source.  The returned path remains the forward path so packet
+    animation and Traceroute continue to display forwarding order.
+    """
+    link_list = list(links)
+    forward = evaluate_route(
+        source_name, source_ip, destination_ip, devices, link_list
+    )
+    if not forward.reachable:
+        return forward
+
+    translated_destination, _ = translate_destination(devices, destination_ip)
+    destination_name = device_for_ip(devices, translated_destination)
+    if not destination_name:
+        return RouteDecision(
+            False,
+            path=forward.path,
+            reason="Destination device could not be resolved for return-path validation.",
+            decisions=forward.decisions,
+            protocol=forward.protocol,
+        )
+
+    reverse = evaluate_route(
+        destination_name,
+        translated_destination,
+        source_ip,
+        devices,
+        link_list,
+    )
+    if reverse.reachable:
+        forward.decisions.append(
+            f"Return path: {' -> '.join(reverse.path)}"
+        )
+        return forward
+
+    reason = f"Return path failed: {reverse.reason}"
+    return RouteDecision(
+        False,
+        path=forward.path,
+        reason=reason,
+        decisions=(
+            forward.decisions
+            + ["Return-path validation failed:"]
+            + reverse.decisions
+        ),
+        protocol=forward.protocol,
     )
