@@ -9,6 +9,7 @@ import struct
 import subprocess
 import time
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -58,6 +59,7 @@ from routing_cli import (
 )
 from routing_engine import evaluate_bidirectional_route, evaluate_route
 from network_validation import (
+    audit_device,
     audit_topology,
     validate_gateway,
     validate_interface_address,
@@ -439,6 +441,87 @@ def apply_styles() -> None:
             background:#fff !important;
         }
 
+        /* Colorful glass controls — scoped strictly to sidebar actions. */
+        [data-testid="stSidebar"] [class*="st-key-project_create"] button,
+        [data-testid="stSidebar"] [class*="st-key-project_open"] button,
+        [data-testid="stSidebar"] [class*="st-key-project_delete"] button,
+        [data-testid="stSidebar"] [class*="st-key-project_save"] button,
+        [data-testid="stSidebar"] [class*="st-key-device_add"] button,
+        [data-testid="stSidebar"] [class*="st-key-load_demo"] button,
+        [data-testid="stSidebar"] [class*="st-key-reset_topology"] button,
+        [data-testid="stSidebar"] [class*="st-key-logout_btn"] button {
+            position:relative !important;
+            overflow:hidden !important;
+            min-height:42px !important;
+            border-radius:13px !important;
+            border:1px solid rgba(255,255,255,.64) !important;
+            color:#ffffff !important;
+            font-weight:850 !important;
+            letter-spacing:.01em !important;
+            backdrop-filter:blur(12px) saturate(145%) !important;
+            -webkit-backdrop-filter:blur(12px) saturate(145%) !important;
+            box-shadow:
+                inset 0 1px 0 rgba(255,255,255,.48),
+                inset 0 -1px 0 rgba(255,255,255,.10),
+                0 7px 16px rgba(30,41,59,.14) !important;
+            transition:transform .18s ease, box-shadow .18s ease,
+                       filter .18s ease !important;
+        }
+
+        [data-testid="stSidebar"] [class*="st-key-project_create"] button {
+            background:linear-gradient(135deg,rgba(14,165,233,.90),rgba(37,99,235,.92)) !important;
+        }
+
+        [data-testid="stSidebar"] [class*="st-key-project_open"] button {
+            background:linear-gradient(135deg,rgba(59,130,246,.88),rgba(6,182,212,.90)) !important;
+        }
+
+        [data-testid="stSidebar"] [class*="st-key-project_delete"] button {
+            background:linear-gradient(135deg,rgba(244,63,94,.90),rgba(239,68,68,.94)) !important;
+        }
+
+        [data-testid="stSidebar"] [class*="st-key-project_save"] button {
+            background:linear-gradient(135deg,rgba(16,185,129,.92),rgba(22,163,74,.94)) !important;
+        }
+
+        [data-testid="stSidebar"] [class*="st-key-device_add"] button {
+            background:linear-gradient(135deg,rgba(37,99,235,.92),rgba(124,58,237,.94),rgba(217,70,239,.88)) !important;
+        }
+
+        [data-testid="stSidebar"] [class*="st-key-load_demo"] button {
+            background:linear-gradient(135deg,rgba(6,182,212,.88),rgba(14,165,233,.92)) !important;
+        }
+
+        [data-testid="stSidebar"] [class*="st-key-reset_topology"] button {
+            background:linear-gradient(135deg,rgba(245,158,11,.90),rgba(249,115,22,.92)) !important;
+        }
+
+        [data-testid="stSidebar"] [class*="st-key-logout_btn"] button {
+            background:linear-gradient(135deg,rgba(236,72,153,.88),rgba(139,92,246,.92)) !important;
+        }
+
+        [data-testid="stSidebar"] [class*="st-key-project_create"] button:hover,
+        [data-testid="stSidebar"] [class*="st-key-project_open"] button:hover,
+        [data-testid="stSidebar"] [class*="st-key-project_delete"] button:hover,
+        [data-testid="stSidebar"] [class*="st-key-project_save"] button:hover,
+        [data-testid="stSidebar"] [class*="st-key-device_add"] button:hover,
+        [data-testid="stSidebar"] [class*="st-key-load_demo"] button:hover,
+        [data-testid="stSidebar"] [class*="st-key-reset_topology"] button:hover,
+        [data-testid="stSidebar"] [class*="st-key-logout_btn"] button:hover {
+            transform:translateY(-2px) scale(1.012) !important;
+            filter:brightness(1.08) saturate(1.08) !important;
+            box-shadow:
+                inset 0 1px 0 rgba(255,255,255,.60),
+                0 11px 22px rgba(30,41,59,.22) !important;
+        }
+
+        [data-testid="stSidebar"] button:disabled {
+            transform:none !important;
+            filter:saturate(.55) !important;
+            opacity:.48 !important;
+            box-shadow:inset 0 1px 0 rgba(255,255,255,.35) !important;
+        }
+
         @media(max-width:1000px) {
             .pn-logo img { width:145px; }
         }
@@ -531,6 +614,75 @@ body {
 .pn-console::-webkit-scrollbar-thumb {
     background: rgba(100,116,139,.38);
     border-radius: 999px;
+}
+
+/* IST greeting replacing the inactive topology toolbar controls. */
+.pn-ist-greeting {
+    display:flex;
+    align-items:center;
+    justify-content:flex-end;
+    min-height:42px;
+    padding:.35rem .35rem .35rem 0;
+    border:0;
+    border-radius:0;
+    color:#172554;
+    background:transparent;
+    box-shadow:none;
+    backdrop-filter:none;
+    -webkit-backdrop-filter:none;
+    font-size:1.18rem;
+    font-weight:850;
+}
+
+.pn-ist-greeting small {
+    margin-left:auto;
+    color:#64748b;
+    font-size:.68rem;
+    font-weight:750;
+}
+
+/* Compact live topology summary shown only inside Validation. */
+.pn-validation-stats {
+    display:grid;
+    grid-template-columns:repeat(4,minmax(0,1fr));
+    gap:.65rem;
+    margin:.5rem 0 .9rem;
+}
+
+.pn-validation-stat {
+    padding:.68rem .8rem;
+    border:1px solid rgba(255,255,255,.78);
+    border-radius:13px;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.92),0 6px 15px rgba(15,23,42,.08);
+    backdrop-filter:blur(10px);
+    -webkit-backdrop-filter:blur(10px);
+}
+
+.pn-validation-stat span {
+    display:block;
+    color:#64748b;
+    font-size:.7rem;
+    font-weight:800;
+    text-transform:uppercase;
+    letter-spacing:.04em;
+}
+
+.pn-validation-stat strong {
+    display:block;
+    margin-top:.1rem;
+    color:#0f172a;
+    font-size:1.2rem;
+    font-weight:900;
+}
+
+.pn-validation-stat.devices { background:linear-gradient(135deg,rgba(219,234,254,.92),rgba(191,219,254,.72)); }
+.pn-validation-stat.links { background:linear-gradient(135deg,rgba(237,233,254,.92),rgba(221,214,254,.74)); }
+.pn-validation-stat.up { background:linear-gradient(135deg,rgba(220,252,231,.94),rgba(187,247,208,.74)); }
+.pn-validation-stat.down { background:linear-gradient(135deg,rgba(254,226,226,.94),rgba(254,202,202,.72)); }
+
+@media(max-width:700px) {
+    .pn-validation-stats { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .pn-ist-greeting small { display:none; }
 }
 
 /* Laptop/mobile safety */
@@ -672,15 +824,15 @@ body {
     font-weight: 800 !important;
 }
 
-/* Far-right AI tab: this is the only tab row containing eight buttons. */
-div[role="tablist"]:has(button:nth-of-type(8)),
-[data-baseweb="tab-list"]:has(button:nth-of-type(8)) {
+/* Far-right AI tab: this is the only tab row containing seven buttons. */
+div[role="tablist"]:has(button:nth-of-type(7)),
+[data-baseweb="tab-list"]:has(button:nth-of-type(7)) {
     display:flex !important;
     width:100% !important;
 }
 
-div[role="tablist"]:has(button:nth-of-type(8)) button:nth-of-type(8),
-[data-baseweb="tab-list"]:has(button:nth-of-type(8)) button:nth-of-type(8) {
+div[role="tablist"]:has(button:nth-of-type(7)) button:nth-of-type(7),
+[data-baseweb="tab-list"]:has(button:nth-of-type(7)) button:nth-of-type(7) {
     margin-left:auto !important;
     padding:.45rem .9rem !important;
     border:1px solid rgba(124,58,237,.38) !important;
@@ -691,14 +843,14 @@ div[role="tablist"]:has(button:nth-of-type(8)) button:nth-of-type(8),
     box-shadow:0 6px 16px rgba(79,70,229,.28) !important;
 }
 
-div[role="tablist"]:has(button:nth-of-type(8)) button:nth-of-type(8) p,
-[data-baseweb="tab-list"]:has(button:nth-of-type(8)) button:nth-of-type(8) p {
+div[role="tablist"]:has(button:nth-of-type(7)) button:nth-of-type(7) p,
+[data-baseweb="tab-list"]:has(button:nth-of-type(7)) button:nth-of-type(7) p {
     color:#ffffff !important;
     font-weight:850 !important;
 }
 
-div[role="tablist"]:has(button:nth-of-type(8)) button:nth-of-type(8):hover,
-[data-baseweb="tab-list"]:has(button:nth-of-type(8)) button:nth-of-type(8):hover {
+div[role="tablist"]:has(button:nth-of-type(7)) button:nth-of-type(7):hover,
+[data-baseweb="tab-list"]:has(button:nth-of-type(7)) button:nth-of-type(7):hover {
     filter:brightness(1.08);
     transform:translateY(-1px);
 }
@@ -4597,6 +4749,12 @@ def auth_page() -> None:
                         "Full name",
                         placeholder="Enter your full name",
                     )
+                    username = st.text_input(
+                        "Username",
+                        key="signup_username",
+                        placeholder="Choose a username",
+                        help="Use at least 3 letters, numbers, or underscores.",
+                    )
                     email = st.text_input(
                         "Gmail address",
                         key="signup_email",
@@ -4624,7 +4782,14 @@ def auth_page() -> None:
                     )
 
                 if submitted:
-                    if password != confirm_password:
+                    cleaned_username = username.strip()
+                    if len(cleaned_username) < 3:
+                        st.error("Username must contain at least 3 characters.")
+                    elif not cleaned_username.replace("_", "").isalnum():
+                        st.error(
+                            "Username can contain only letters, numbers, and underscores."
+                        )
+                    elif password != confirm_password:
                         st.error("Passwords do not match. Please try again.")
                     elif not accepted_terms:
                         st.error(
@@ -4632,7 +4797,12 @@ def auth_page() -> None:
                         )
                     else:
                         try:
-                            sign_up(email, password, full_name, "")
+                            sign_up(
+                                email,
+                                password,
+                                full_name,
+                                cleaned_username,
+                            )
                             st.success(
                                 "Account created. Verify your email before signing in."
                             )
@@ -4920,32 +5090,33 @@ with title_col:
     )
 
 with toolbar_col:
-    tool_cols = st.columns(5)
+    greeting_space_col, greeting_col, delete_tool_col = st.columns(
+        [0.8, 3.1, 1],
+        gap="small",
+    )
+    ist_now = datetime.now(
+        timezone(timedelta(hours=5, minutes=30))
+    )
+    if 5 <= ist_now.hour < 12:
+        greeting = "Good Morning"
+    elif 12 <= ist_now.hour < 17:
+        greeting = "Good Afternoon"
+    elif 17 <= ist_now.hour < 22:
+        greeting = "Good Evening"
+    else:
+        greeting = "Good Night"
 
-    with tool_cols[0]:
-        st.button(
-            "↖ Select",
-            width="stretch",
-            key="tool_select",
+    with greeting_col:
+        st.markdown(
+            f"""
+            <div class="pn-ist-greeting">
+                {greeting}, {html.escape(str(user))} 👋
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
-    with tool_cols[1]:
-        if st.button(
-            "🔗 Connect",
-            width="stretch",
-            key="tool_connect",
-        ):
-            if st.session_state.selected_device:
-                st.session_state.connect_source = (
-                    st.session_state.selected_device
-                )
-            st.rerun()
-    with tool_cols[2]:
-        st.button(
-            "✥ Move",
-            width="stretch",
-            key="tool_move",
-        )
-    with tool_cols[3]:
+
+    with delete_tool_col:
         if st.button(
             "🗑 Delete",
             width="stretch",
@@ -4956,14 +5127,6 @@ with toolbar_col:
             if selected in st.session_state.devices:
                 delete_device(selected)
                 st.rerun()
-
-    with tool_cols[4]:
-        st.button(
-            "⛶ Full",
-            width="stretch",
-            key="tool_fullscreen",
-            help="Use your browser full-screen mode for the largest workspace.",
-        )
 
 canvas_col, right_col = st.columns([4.8, 1.15], gap="small")
 
@@ -5261,7 +5424,6 @@ with right_col:
     validation_tab,
     packet_tab,
     wireshark_tab,
-    events_tab,
     ai_tab,
 ) = st.tabs(
     [
@@ -5271,7 +5433,6 @@ with right_col:
         "Validation",
         "Packet Analysis",
         "Wireshark",
-        "Events",
         "✨ AI Assistant",
     ],
     key="main_tools_tab",
@@ -5288,7 +5449,7 @@ st.iframe(
         const doc = window.parent.document;
         const rows = Array.from(doc.querySelectorAll('[role="tablist"]'));
         const row = rows.find(item =>
-          item.querySelectorAll('[role="tab"]').length === 8
+          item.querySelectorAll('[role="tab"]').length === 7
         );
         if (!row) return false;
 
@@ -5825,13 +5986,51 @@ with validation_tab:
         "Checks duplicate IPs, gateways, masks, overlapping networks, "
         "VLAN references, and router subinterface encapsulation."
     )
-    issues = audit_topology(st.session_state.devices)
-    if not issues:
-        st.success("No configuration issues detected.")
+    validation_link_states = [
+        link_operational_status(link)[0]
+        for link in st.session_state.links
+    ]
+    validation_up_links = validation_link_states.count("up")
+    validation_down_links = len(validation_link_states) - validation_up_links
+    st.markdown(
+        f"""
+        <div class="pn-validation-stats">
+            <div class="pn-validation-stat devices">
+                <span>Devices</span><strong>{len(st.session_state.devices)}</strong>
+            </div>
+            <div class="pn-validation-stat links">
+                <span>Links</span><strong>{len(st.session_state.links)}</strong>
+            </div>
+            <div class="pn-validation-stat up">
+                <span>Up</span><strong>{validation_up_links}</strong>
+            </div>
+            <div class="pn-validation-stat down">
+                <span>Down</span><strong>{validation_down_links}</strong>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    validation_devices = list(st.session_state.devices)
+    if not validation_devices:
+        st.info("Add a device to the topology to run validation.")
     else:
+        validation_device = st.selectbox(
+            "Choose Device",
+            validation_devices,
+            key="validation_device_select",
+        )
+        issues, success_messages = audit_device(
+            st.session_state.devices,
+            st.session_state.links,
+            validation_device,
+        )
         error_count = sum(issue.severity == "error" for issue in issues)
-        warning_count = len(issues) - error_count
-        st.write(f"Errors: **{error_count}** · Warnings: **{warning_count}**")
+        warning_count = sum(issue.severity == "warning" for issue in issues)
+        st.write(
+            f"Selected device: **{validation_device}** · "
+            f"Errors: **{error_count}** · Warnings: **{warning_count}**"
+        )
         for issue in issues:
             message = (
                 f"{issue.device}:{issue.interface} — {issue.message}"
@@ -5840,6 +6039,8 @@ with validation_tab:
                 st.error(message)
             else:
                 st.warning(message)
+        for message in success_messages:
+            st.success(message)
 
 with packet_tab:
     packet_title_col, packet_clear_col = st.columns([4, 1])
@@ -5958,42 +6159,6 @@ with wireshark_tab:
                 "For Streamlit Cloud, download the PCAP and "
                 "open it locally."
             )
-
-with events_tab:
-    events_title_col, events_clear_col = st.columns([4, 1])
-
-    with events_title_col:
-        st.subheader("Events")
-
-    with events_clear_col:
-        if st.button(
-            "Clear Events",
-            key="clear_events",
-            width="stretch",
-        ):
-            st.session_state.events_log = []
-            st.rerun()
-
-    st.write(f"Devices: {len(st.session_state.devices)}")
-    st.write(f"Links: {len(st.session_state.links)}")
-    st.write(
-        f"Selected device: "
-        f"{st.session_state.selected_device or 'None'}"
-    )
-
-    if st.session_state.get("events_log"):
-        st.markdown("#### Event Log")
-
-        for event in reversed(
-            st.session_state.events_log[-50:]
-        ):
-            st.code(
-                f"[{event['time']}] {event['message']}",
-                language="text",
-            )
-    else:
-        st.info("No events recorded yet.")
-
 
 if (
     st.session_state.dialog_mode == "pc_config"

@@ -165,3 +165,103 @@ def audit_topology(devices: dict[str, Any]) -> list[ValidationIssue]:
 
     return issues
 
+
+def audit_device(
+    devices: dict[str, Any],
+    links: list[dict[str, Any]],
+    device_name: str,
+) -> tuple[list[ValidationIssue], list[str]]:
+    """Return configuration issues and readiness successes for one device."""
+    if device_name not in devices:
+        return [ValidationIssue(
+            "error", device_name, "device", "Device does not exist."
+        )], []
+
+    device = devices[device_name]
+    issues = [
+        issue for issue in audit_topology(devices)
+        if issue.device == device_name
+    ]
+    interfaces = getattr(device, "interfaces", {}) or {}
+    device_type = getattr(device, "device_type", "Device")
+
+    active_connected: set[str] = set()
+    failed_links = 0
+    for link in links:
+        endpoint_interface = ""
+        if str(link.get("source", "")) == device_name:
+            endpoint_interface = str(link.get("source_if") or "")
+        elif str(link.get("target", "")) == device_name:
+            endpoint_interface = str(link.get("target_if") or "")
+        else:
+            continue
+
+        interface = interfaces.get(endpoint_interface)
+        is_active = str(getattr(interface, "status", "up")).lower() not in {
+            "down", "administratively down", "disabled"
+        }
+        if link.get("forced_down") or not is_active:
+            failed_links += 1
+        else:
+            active_connected.add(endpoint_interface)
+
+    if not active_connected:
+        detail = (
+            "has connections, but none are operational."
+            if failed_links
+            else "is not connected to any topology device."
+        )
+        issues.append(ValidationIssue(
+            "warning", device_name, "connectivity", f"{device_name} {detail}"
+        ))
+
+    configured_ipv4 = {
+        name: parsed
+        for name, interface in interfaces.items()
+        for parsed in [_ipv4_interface(getattr(interface, "ip_address", ""))]
+        if parsed
+    }
+
+    # A pure Layer-2 switch forwards frames without an interface IPv4 address.
+    if device_type != "Switch":
+        if not configured_ipv4:
+            issues.append(ValidationIssue(
+                "warning", device_name, "addressing",
+                f"{device_name} has no configured IPv4 address.",
+            ))
+        for interface_name in sorted(active_connected):
+            if interface_name not in configured_ipv4:
+                issues.append(ValidationIssue(
+                    "warning", device_name, interface_name,
+                    "Connected interface has no configured IPv4 address.",
+                ))
+
+    end_host_types = {
+        "PC", "Laptop", "Server", "Authentication Server",
+        "Camera / PC Video", "IP Phone",
+    }
+    if device_type in end_host_types and configured_ipv4 and active_connected:
+        configured_names = set(configured_ipv4)
+        if configured_names.isdisjoint(active_connected):
+            issues.append(ValidationIssue(
+                "error", device_name, "addressing",
+                "The IPv4 address is configured on a disconnected adapter; "
+                "move it to the active connected interface.",
+            ))
+
+    successes: list[str] = []
+    if not issues:
+        connection_count = len(active_connected)
+        if device_type == "Switch":
+            successes.append(
+                f"{device_name} passed validation as a Layer 2 switch: "
+                f"{connection_count} active connection(s); interface IP is optional."
+            )
+        else:
+            successes.append(
+                f"{device_name} passed configuration validation: "
+                f"{connection_count} active connection(s) and "
+                f"{len(configured_ipv4)} configured IPv4 interface(s)."
+            )
+
+    return issues, successes
