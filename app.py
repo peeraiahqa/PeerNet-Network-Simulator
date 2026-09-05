@@ -1258,9 +1258,12 @@ def add_device(device_type: str, position: Optional[dict] = None) -> str:
     ensure_routing_defaults(st.session_state.devices[name])
 
     count = len(st.session_state.devices)
+    # Use three visible rows, then extend the topology horizontally. This keeps
+    # large layouts reachable through the canvas scrollbar without introducing
+    # a vertical topology scrollbar. Existing saved positions are unchanged.
     st.session_state.positions[name] = position or {
-        "x": 150 + ((count - 1) % 4) * 190,
-        "y": 135 + ((count - 1) // 4) * 145,
+        "x": 150 + ((count - 1) // 3) * 190,
+        "y": 105 + ((count - 1) % 3) * 145,
     }
 
     st.session_state.cli_modes[name] = "user"
