@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 import streamlit as st
+import streamlit.components.v1 as components
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -5442,7 +5443,7 @@ with right_col:
 
 # Native Streamlit tab markup can vary by release. Apply the AI tab styling
 # directly after render so it remains at the far-right edge across versions.
-st.iframe(
+components.html(
     """
     <script>
     (() => {
@@ -5490,8 +5491,6 @@ st.iframe(
     </script>
     """,
     height=1,
-    width="content",
-    tab_index=-1,
 )
 
 selected_device = st.session_state.selected_device
