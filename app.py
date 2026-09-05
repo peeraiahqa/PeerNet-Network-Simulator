@@ -5437,9 +5437,7 @@ with right_col:
         "Packet Analysis",
         "Wireshark",
         "✨ AI Assistant",
-    ],
-    key="main_tools_tab",
-    on_change="rerun",
+    ]
 )
 
 # Native Streamlit tab markup can vary by release. Apply the AI tab styling
