@@ -4909,6 +4909,13 @@ with st.sidebar:
         for item in projects
     }
 
+    pending_project_name = st.session_state.pop(
+        "_pending_project_name",
+        None,
+    )
+    if pending_project_name is not None:
+        st.session_state.project_name = pending_project_name
+
     project_name = st.text_input(
         "Project Name",
         value=st.session_state.get(
@@ -4954,6 +4961,7 @@ with st.sidebar:
                 )
                 st.session_state.current_project_id = project["id"]
                 st.session_state.current_project_name = project["name"]
+                st.session_state._pending_project_name = project["name"]
                 st.rerun()
             except Exception as error:
                 st.error(f"Unable to open project: {error}")
