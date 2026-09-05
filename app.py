@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 import streamlit as st
+import streamlit.components.v1 as components
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -1258,9 +1259,12 @@ def add_device(device_type: str, position: Optional[dict] = None) -> str:
     ensure_routing_defaults(st.session_state.devices[name])
 
     count = len(st.session_state.devices)
+    # Use three visible rows, then extend the topology horizontally. This keeps
+    # large layouts reachable through the canvas scrollbar without introducing
+    # a vertical topology scrollbar. Existing saved positions are unchanged.
     st.session_state.positions[name] = position or {
-        "x": 150 + ((count - 1) % 4) * 190,
-        "y": 135 + ((count - 1) // 4) * 145,
+        "x": 150 + ((count - 1) // 3) * 190,
+        "y": 105 + ((count - 1) % 3) * 145,
     }
 
     st.session_state.cli_modes[name] = "user"
@@ -5434,14 +5438,12 @@ with right_col:
         "Packet Analysis",
         "Wireshark",
         "✨ AI Assistant",
-    ],
-    key="main_tools_tab",
-    on_change="rerun",
+    ]
 )
 
 # Native Streamlit tab markup can vary by release. Apply the AI tab styling
 # directly after render so it remains at the far-right edge across versions.
-st.iframe(
+components.html(
     """
     <script>
     (() => {
@@ -5489,8 +5491,6 @@ st.iframe(
     </script>
     """,
     height=1,
-    width="content",
-    tab_index=-1,
 )
 
 selected_device = st.session_state.selected_device
