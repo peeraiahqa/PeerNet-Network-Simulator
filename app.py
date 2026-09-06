@@ -348,6 +348,26 @@ def apply_styles() -> None:
             font-weight:850;
         }
 
+        .pn-contact-link {
+            display:inline-flex;
+            align-items:center;
+            gap:.3rem;
+            margin:.15rem 0 .35rem;
+            padding:.3rem .62rem;
+            border:1px solid #bfdbfe;
+            border-radius:999px;
+            color:#1d4ed8 !important;
+            background:linear-gradient(135deg,#eff6ff,#f5f3ff);
+            font-weight:850;
+            text-decoration:none !important;
+        }
+
+        .pn-contact-link:hover {
+            border-color:#818cf8;
+            color:#6d28d9 !important;
+            box-shadow:0 5px 12px rgba(79,70,229,.14);
+        }
+
         .pn-topbar {
             display:flex;
             align-items:center;
@@ -5070,6 +5090,9 @@ with st.sidebar:
             Powered by <strong style="color:#2563eb">
             PeerNet Solutions</strong><br>
             <span class="pn-license">PeerNet Simulator License</span><br>
+            <a class="pn-contact-link" href="mailto:info@peernetsolutions.in">
+                ✉ info@peernetsolutions.in
+            </a><br>
             © 2026 PeerNet Solutions. All rights reserved.
         </div>
         """,
